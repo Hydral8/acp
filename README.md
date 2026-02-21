@@ -21,6 +21,43 @@ To learn more about mcp-use and MCP:
 
 - [mcp-use Documentation](https://mcp-use.com/docs/typescript/getting-started/quickstart) — guides, API reference, and tutorials
 
+## Runpod MCP Tools
+
+The server exposes a `runpod-login-deploy` tool that:
+
+1. Configures `runpodctl` with your API key.
+2. Creates a pod using `runpodctl create pod`.
+3. Ensures an SSH key is present on your machine and added to Runpod (defaults to `~/.ssh/id_ed25519`; disable with `ensureKey: false`).
+
+Requirements:
+
+- `runpodctl` installed and available on your `PATH`.
+
+Inputs (high level):
+
+- `apiKey` (required)
+- `gpuType` (required)
+- `imageName` or `templateId` (required)
+- Optional flags like `gpuCount`, `secureCloud`, `communityCloud`, `volumeSize`, `env`, `ports`
+
+The server also exposes:
+
+- `runpod-pod-run`: runs a single command on a pod over SSH and returns stdout/stderr.
+
+Common inputs:
+
+- `podId` (required)
+- `ensureKey` (optional): add an SSH key via `runpodctl ssh add-key`
+- `generateKey` (optional): generate a new keypair first (default true)
+- `keyPath` (optional): private key path (default `~/.ssh/id_ed25519`)
+- `key` / `keyFile` (optional): SSH public key contents or file path (if you don't want to generate)
+- `host` / `port` / `user` (optional overrides if SSH details cannot be parsed)
+- `identityFile` (optional, `runpod-pod-run`): SSH private key path
+- `allocatePty` (optional, `runpod-pod-run`): request a PTY (default true)
+- `timeoutMs` (optional, `runpod-pod-run`): SSH process timeout in ms (default 15000)
+- `mode` (optional, `runpod-pod-run`): `proxy` (ssh.runpod.io, default) or `direct` (public-IP SSH)
+- `skipHostKeyCheck` (optional, `runpod-pod-run`): disable strict host key checking
+
 ## Deploy on Manufact Cloud
 
 ```bash
