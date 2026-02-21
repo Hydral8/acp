@@ -100,6 +100,32 @@ server.tool(
   }
 );
 
+// ── Tool: prepare-train ────────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "prepare-train",
+    description: "Select a training dataset (curated or custom URL) and preview a dummy forward pass with data flowing through the model architecture",
+    schema: z.object({}),
+    widget: {
+      name: "dataset-prep",
+      invoking: "Loading dataset setup…",
+      invoked: "Dataset setup ready",
+    },
+  },
+  async () => {
+    return widget({
+      props: {},
+      output: text(
+        "Dataset preparation ready. " +
+        "Choose a curated dataset (LLM, VLM, or RL/RLHF) or paste a HuggingFace/Kaggle URL. " +
+        "Platform is auto-detected and the appropriate API key input will appear. " +
+        "Click 'Run Dummy Pass' to watch data flow through the model simulation."
+      ),
+    });
+  }
+);
+
 // ── Tool: validate-graph ───────────────────────────────────────────────────
 
 server.tool(
