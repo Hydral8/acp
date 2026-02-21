@@ -132,6 +132,93 @@ const LAYER_CATS: Record<string, string> = {
   ResNetBlock: 'composite', MLPBlock: 'composite', Custom: 'composite',
 };
 
+// ── Training helpers ───────────────────────────────────────────────────────
+
+type TaskType = 'nlp_lm' | 'nlp_classification' | 'vision' | 'tabular' | 'rlhf' | 'unknown';
+type DatasetCategory = 'llm' | 'vlm' | 'rlhf' | 'cv' | 'tabular';
+
+interface TaskAnalysis {
+  taskType: TaskType;
+  category: DatasetCategory;
+  suggestedLoss: string;
+  suggestedOptimizer: string;
+  description: string;
+}
+
+function detectTask(graph: GraphInput): TaskAnalysis {
+  const types = new Set(graph.nodes.map(n => n.type));
+  const hasNLP    = types.has('Tokenizer') || types.has('Embedding') || types.has('TransformerBlock') || types.has('MultiHeadAttn');
+  const hasVision = types.has('Conv2D')    || types.has('ConvBNReLU') || types.has('ResNetBlock');
+  const hasSoftmax = types.has('Softmax');
+  const hasRLHFPair = types.has('Sigmoid') && (types.has('Embedding') || types.has('Linear'));
+
+  if (hasNLP && hasRLHFPair && !hasSoftmax) {
+    return { taskType: 'rlhf', category: 'rlhf', suggestedLoss: 'BCEWithLogitsLoss', suggestedOptimizer: 'AdamW', description: 'RLHF / reward model (NLP with preference pairs)' };
+  }
+  if (hasNLP) {
+    if (hasSoftmax) return { taskType: 'nlp_classification', category: 'llm', suggestedLoss: 'CrossEntropyLoss', suggestedOptimizer: 'AdamW', description: 'NLP classification / token prediction' };
+    return { taskType: 'nlp_lm', category: 'llm', suggestedLoss: 'CrossEntropyLoss', suggestedOptimizer: 'AdamW', description: 'Language model / causal LM' };
+  }
+  if (hasVision && (types.has('Embedding') || types.has('TransformerBlock'))) {
+    return { taskType: 'vision', category: 'vlm', suggestedLoss: 'CrossEntropyLoss', suggestedOptimizer: 'AdamW', description: 'Vision-language model' };
+  }
+  if (hasVision) {
+    return { taskType: 'vision', category: 'cv', suggestedLoss: 'CrossEntropyLoss', suggestedOptimizer: 'Adam', description: 'Computer vision / image classification' };
+  }
+  const hasLinear = types.has('Linear') || types.has('MLPBlock');
+  if (hasLinear) {
+    const hasMSE = types.has('MSELoss');
+    return { taskType: 'tabular', category: 'tabular', suggestedLoss: hasMSE ? 'MSELoss' : 'CrossEntropyLoss', suggestedOptimizer: 'Adam', description: 'Tabular / structured data model' };
+  }
+  return { taskType: 'unknown', category: 'llm', suggestedLoss: 'CrossEntropyLoss', suggestedOptimizer: 'Adam', description: 'Unknown task type' };
+}
+
+function computeShapeAnnotations(graph: GraphInput): Record<string, string> {
+  const annotations: Record<string, string> = {};
+  const sorted  = topologicalSort(graph.nodes, graph.edges);
+  const incoming = new Map<string, string[]>();
+  for (const n of graph.nodes) incoming.set(n.id, []);
+  for (const e of graph.edges) incoming.get(e.targetId)?.push(e.sourceId);
+
+  const shapes = new Map<string, number[] | null>();
+  for (const node of sorted) {
+    const inIds = incoming.get(node.id) ?? [];
+    const inShape = inIds.length > 0 ? (shapes.get(inIds[0]) ?? null) : null;
+    const q = node.parameters;
+    const v = (k: string, fb = 0) => (typeof q[k] === 'number' ? (q[k] as number) : fb);
+    let out: number[] | null = null;
+    switch (node.type) {
+      case 'Input':    out = (q.shape as number[] | undefined) ?? null; break;
+      case 'Linear': case 'MLPBlock': {
+        const o = v('out_features', 64);
+        out = inShape ? [...inShape.slice(0, -1), o] : null; break;
+      }
+      case 'Conv2D': case 'ConvBNReLU': {
+        if (inShape && inShape.length >= 3) {
+          const oc = v('out_channels', 32), k = v('kernel_size', 3), s = v('stride', 1), pad = v('padding', 0);
+          const ci = inShape.length >= 4 ? 1 : 0;
+          const o2 = [...inShape]; o2[ci] = oc;
+          for (let d = ci + 1; d < o2.length; d++) o2[d] = Math.floor((o2[d] + 2 * pad - k) / s + 1);
+          out = o2;
+        } break;
+      }
+      case 'Flatten': {
+        if (inShape) {
+          const sd = v('start_dim', 1);
+          const flat = inShape.slice(sd).reduce((a, b) => a * b, 1);
+          out = [...inShape.slice(0, sd), flat];
+        } break;
+      }
+      case 'Tokenizer': out = [v('max_length', 512)]; break;
+      case 'Embedding': out = inShape ? [...inShape, v('embedding_dim', 512)] : null; break;
+      default: out = inShape; break;
+    }
+    shapes.set(node.id, out);
+    if (out) annotations[node.id] = `[${out.join('×')}]`;
+  }
+  return annotations;
+}
+
 // ── Tool: prepare-train ────────────────────────────────────────────────────
 
 server.tool(
@@ -154,32 +241,47 @@ server.tool(
     },
   },
   async ({ graph }) => {
-    // Build the ordered node list for the widget simulation
-    let modelNodes: Array<{ id: string; label: string; cat: string }> = [];
+    // Use provided graph, or fall back to savedDesign, or empty
+    const g = (graph && graph.nodes.length > 0) ? graph : savedDesign ?? null;
 
-    if (graph && graph.nodes.length > 0) {
-      const layerNodes = graph.nodes.filter(n => !TRAINING_TYPES.has(n.type));
-      const layerEdges = graph.edges.filter(
+    let modelNodes: Array<{ id: string; label: string; cat: string }> = [];
+    let taskInfo: TaskAnalysis | null = null;
+    let shapeAnnotations: Record<string, string> = {};
+
+    if (g && g.nodes.length > 0) {
+      taskInfo = detectTask(g as GraphInput);
+      shapeAnnotations = computeShapeAnnotations(g as GraphInput);
+
+      const layerNodes = g.nodes.filter(n => !TRAINING_TYPES.has(n.type));
+      const layerEdges = g.edges.filter(
         e => layerNodes.some(n => n.id === e.sourceId) &&
              layerNodes.some(n => n.id === e.targetId)
       );
-      const sorted = topologicalSort(layerNodes, layerEdges);
+      const sorted = topologicalSort(layerNodes as NodeInput[], layerEdges as EdgeInput[]);
       modelNodes = sorted.map(n => ({
         id:    n.id,
         label: LAYER_LABELS[n.type] ?? n.type,
         cat:   LAYER_CATS[n.type]   ?? 'core',
+        shape: shapeAnnotations[n.id] ?? '',
       }));
     }
 
     return widget({
-      props: { modelNodes },
+      props: {
+        modelNodes,
+        taskType:          taskInfo?.taskType          ?? null,
+        suggestedCategory: taskInfo?.category          ?? null,
+        suggestedLoss:     taskInfo?.suggestedLoss     ?? 'CrossEntropyLoss',
+        suggestedOptimizer:taskInfo?.suggestedOptimizer ?? 'Adam',
+        shapeAnnotations,
+      },
       output: text(
-        modelNodes.length > 0
-          ? `Dataset preparation ready. Your ${modelNodes.length}-layer model is loaded into the simulation. ` +
-            "Choose a dataset, then click 'Run Dummy Pass' to watch data flow through your architecture."
-          : "Dataset preparation ready. " +
-            "Choose a curated dataset (LLM, VLM, or RL/RLHF) or paste a HuggingFace/Kaggle URL. " +
-            "Pass a graph to animate your real model architecture."
+        taskInfo
+          ? `Training setup ready. Detected: ${taskInfo.description}. ` +
+            `${modelNodes.length} layers loaded. Suggested loss: ${taskInfo.suggestedLoss}, ` +
+            `optimizer: ${taskInfo.suggestedOptimizer}. ` +
+            "Adjust the dataset and hyperparameters in the widget, then generate training scripts."
+          : "Training setup ready. No model design found — build an architecture first with design-architecture + render-model-builder."
       ),
     });
   }
@@ -204,6 +306,223 @@ server.tool(
     return object({ valid: errors.length === 0, errors });
   }
 );
+
+// ── Tool: generate-training-code ───────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'generate-training-code',
+    description: 'Generate modular Python training files (model.py, data.py, train.py) from the current model design and chosen training config. Reads the current graph from savedDesign automatically.',
+    schema: z.object({
+      dataset: z.object({
+        name: z.string().describe("Human-readable dataset name"),
+        source: z.enum(['huggingface', 'torchvision', 'custom']).describe("Where the dataset comes from"),
+        hfId: z.string().optional().describe("HuggingFace dataset id, e.g. 'roneneldan/TinyStories'"),
+        torchvisionName: z.string().optional().describe("torchvision class name, e.g. 'MNIST', 'CIFAR10'"),
+      }),
+      taskType: z.string().optional().describe("Detected task type from prepare-train"),
+      optimizer: z.enum(['Adam', 'AdamW', 'SGD', 'RMSprop']).describe("Optimizer to use"),
+      loss: z.enum(['CrossEntropyLoss', 'MSELoss', 'BCEWithLogitsLoss', 'NLLLoss']).describe("Loss function"),
+      hyperparams: z.object({
+        lr:           z.number().describe("Learning rate"),
+        batch_size:   z.number().describe("Batch size"),
+        epochs:       z.number().describe("Training epochs"),
+        weight_decay: z.number().optional().describe("Weight decay (default 0)"),
+      }),
+    }),
+    outputSchema: z.object({ modelPy: z.string(), dataPy: z.string(), trainPy: z.string(), summary: z.string() }),
+  },
+  async ({ dataset, taskType, optimizer, loss, hyperparams }) => {
+    const graph = savedDesign;
+    const modelPy = graph ? generatePyTorchCode(graph as GraphInput) : '# No model design found. Build one with design-architecture first.\n';
+    const dataPy  = generateDataPy(dataset, taskType ?? 'unknown', hyperparams.batch_size);
+    const trainPy = generateTrainPy(optimizer, loss, hyperparams);
+    return object({
+      modelPy,
+      dataPy,
+      trainPy,
+      summary: `Generated model.py (${modelPy.split('\n').length} lines), data.py (${dataPy.split('\n').length} lines), train.py (${trainPy.split('\n').length} lines).`,
+    });
+  }
+);
+
+// ── Training code-gen helpers ───────────────────────────────────────────────
+
+function generateDataPy(
+  dataset: { name: string; source: string; hfId?: string; torchvisionName?: string },
+  taskType: string,
+  batchSize: number,
+): string {
+  const bs = batchSize;
+  if (dataset.source === 'huggingface') {
+    const hfId = dataset.hfId ?? 'dataset/name';
+    const isNLP = taskType.startsWith('nlp') || taskType === 'rlhf';
+    return `"""data.py — HuggingFace dataset loader for ${dataset.name}"""
+from datasets import load_dataset
+from torch.utils.data import DataLoader
+${isNLP ? "from transformers import AutoTokenizer" : "import torchvision.transforms as T"}
+
+DATASET_ID  = "${hfId}"
+BATCH_SIZE  = ${bs}
+MAX_LENGTH  = 512   # tokens${isNLP ? `
+TOKENIZER   = "gpt2"  # swap for your tokenizer
+
+def get_dataloaders(batch_size=BATCH_SIZE, hf_token=None):
+    ds = load_dataset(DATASET_ID, token=hf_token)
+    tok = AutoTokenizer.from_pretrained(TOKENIZER)
+    tok.pad_token = tok.eos_token
+
+    def tokenize(batch):
+        return tok(batch["text"], truncation=True, max_length=MAX_LENGTH, padding="max_length")
+
+    train_ds = ds["train"].map(tokenize, batched=True, remove_columns=ds["train"].column_names)
+    val_ds   = ds.get("validation") or ds.get("test")
+    if val_ds:
+        val_ds = val_ds.map(tokenize, batched=True, remove_columns=val_ds.column_names)
+
+    train_ds.set_format("torch")
+    if val_ds: val_ds.set_format("torch")
+
+    return (
+        DataLoader(train_ds, batch_size=batch_size, shuffle=True),
+        DataLoader(val_ds,   batch_size=batch_size) if val_ds else None,
+    )` : `
+
+def get_dataloaders(batch_size=BATCH_SIZE, hf_token=None):
+    ds = load_dataset(DATASET_ID, token=hf_token)
+    # TODO: define transforms and adjust column names for your dataset
+    transform = T.Compose([T.ToTensor(), T.Normalize((0.5,), (0.5,))])
+    train_ds = ds["train"]
+    val_ds   = ds.get("validation") or ds.get("test")
+    return (
+        DataLoader(train_ds, batch_size=batch_size, shuffle=True),
+        DataLoader(val_ds,   batch_size=batch_size) if val_ds else None,
+    )`}
+`;
+  }
+
+  if (dataset.source === 'torchvision') {
+    const cls = dataset.torchvisionName ?? 'CIFAR10';
+    const isGrayscale = cls === 'MNIST' || cls === 'FashionMNIST';
+    const norm = isGrayscale ? '(0.5,), (0.5,)' : '(0.485, 0.456, 0.406), (0.229, 0.224, 0.225)';
+    return `"""data.py — torchvision ${cls} loader"""
+import torchvision
+import torchvision.transforms as T
+from torch.utils.data import DataLoader
+
+BATCH_SIZE = ${bs}
+
+def get_dataloaders(batch_size=BATCH_SIZE):
+    transform = T.Compose([T.ToTensor(), T.Normalize(${norm})])
+    train_set = torchvision.datasets.${cls}(root="./data", train=True,  download=True, transform=transform)
+    val_set   = torchvision.datasets.${cls}(root="./data", train=False, download=True, transform=transform)
+    return (
+        DataLoader(train_set, batch_size=batch_size, shuffle=True,  num_workers=2),
+        DataLoader(val_set,   batch_size=batch_size, shuffle=False, num_workers=2),
+    )
+`;
+  }
+
+  // custom / fallback
+  return `"""data.py — custom dataset loader"""
+from torch.utils.data import Dataset, DataLoader
+import torch
+
+BATCH_SIZE = ${bs}
+
+class CustomDataset(Dataset):
+    def __init__(self, split="train"):
+        # TODO: load your data here
+        self.data   = torch.randn(1000, 3, 32, 32)  # placeholder
+        self.labels = torch.randint(0, 10, (1000,))  # placeholder
+
+    def __len__(self):  return len(self.labels)
+    def __getitem__(self, i): return self.data[i], self.labels[i]
+
+def get_dataloaders(batch_size=BATCH_SIZE):
+    return (
+        DataLoader(CustomDataset("train"), batch_size=batch_size, shuffle=True),
+        DataLoader(CustomDataset("val"),   batch_size=batch_size),
+    )
+`;
+}
+
+function generateTrainPy(
+  optimizer: string,
+  loss: string,
+  hp: { lr: number; batch_size: number; epochs: number; weight_decay?: number },
+): string {
+  const wd = hp.weight_decay ?? 0;
+  const optArgs = optimizer === 'SGD'
+    ? `model.parameters(), lr=${hp.lr}, momentum=0.9, weight_decay=${wd}`
+    : `model.parameters(), lr=${hp.lr}, weight_decay=${wd}`;
+  const lossInit = loss === 'MSELoss'
+    ? 'nn.MSELoss()'
+    : loss === 'BCEWithLogitsLoss'
+    ? 'nn.BCEWithLogitsLoss()'
+    : 'nn.CrossEntropyLoss()';
+
+  return `"""train.py — training loop"""
+import torch
+import torch.nn as nn
+from model import Model
+from data import get_dataloaders
+
+DEVICE    = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+LR        = ${hp.lr}
+BATCH     = ${hp.batch_size}
+EPOCHS    = ${hp.epochs}
+SAVE_PATH = "checkpoint_best.pt"
+
+
+def train():
+    model     = Model().to(DEVICE)
+    optimizer = torch.optim.${optimizer}(${optArgs})
+    criterion = ${lossInit}
+    train_loader, val_loader = get_dataloaders(batch_size=BATCH)
+
+    best_val = float("inf")
+
+    for epoch in range(1, EPOCHS + 1):
+        # ── training ──────────────────────────────────────────────────────
+        model.train()
+        train_loss = 0.0
+        for batch in train_loader:
+            x, y = batch[0].to(DEVICE), batch[1].to(DEVICE)
+            optimizer.zero_grad()
+            out  = model(x)
+            loss = criterion(out, y)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        train_loss /= len(train_loader)
+
+        # ── validation ────────────────────────────────────────────────────
+        val_info = ""
+        if val_loader:
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    x, y = batch[0].to(DEVICE), batch[1].to(DEVICE)
+                    val_loss += criterion(model(x), y).item()
+            val_loss /= len(val_loader)
+            val_info = f"  val={val_loss:.4f}"
+            if val_loss < best_val:
+                best_val = val_loss
+                torch.save(model.state_dict(), SAVE_PATH)
+                val_info += " ✓saved"
+
+        print(f"Epoch {epoch:03d}/{EPOCHS}  train={train_loss:.4f}{val_info}")
+
+    torch.save(model.state_dict(), "model_final.pt")
+    print(f"Done. Best val loss: {best_val:.4f}")
+
+
+if __name__ == "__main__":
+    train()
+`;
+}
 
 // ── Validation ─────────────────────────────────────────────────────────────
 
