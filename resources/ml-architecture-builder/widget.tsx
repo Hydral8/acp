@@ -323,20 +323,18 @@ export default function MLArchitectureBuilder() {
   const trainValidations = useMemo(() => {
     const inputNodes = nodes.filter(n => n.type === 'Input');
     const hasConflicts = [...shapeMap.values()].some(v => v.conflict !== null);
-    const hasOptimizer = nodes.some(n => OPTIMIZER_TYPES.has(n.type));
-    const hasLoss = nodes.some(n => LOSS_TYPES.has(n.type));
     const preShape = PREPROCESS_OUT_SHAPE[trainCategory];
     const inShape = (inputNode?.parameters?.shape as number[] | undefined) ?? null;
     const shapeMatches = inShape !== null && JSON.stringify(preShape) === JSON.stringify(inShape);
     return [
       { label: 'Has one Input node', pass: inputNodes.length === 1 },
       { label: 'No shape conflicts', pass: !hasConflicts },
-      { label: 'Has Optimizer block', pass: hasOptimizer },
-      { label: 'Has Loss block', pass: hasLoss },
-      { label: `Preprocess shape → Input [${preShape.join('×')}]`, pass: shapeMatches },
+      { label: `Preprocess → Input [${preShape.join('×')}]`, pass: shapeMatches },
       { label: 'Dataset selected', pass: !!trainSelected },
+      { label: `Optimizer: ${trainOptimizer}`, pass: !!trainOptimizer },
+      { label: `Loss: ${trainLoss}`, pass: !!trainLoss },
     ];
-  }, [nodes, shapeMap, trainCategory, inputNode, trainSelected]);
+  }, [nodes, shapeMap, trainCategory, inputNode, trainSelected, trainOptimizer, trainLoss]);
 
   const canGenerateTraining = trainValidations.every(v => v.pass);
 
@@ -432,8 +430,6 @@ export default function MLArchitectureBuilder() {
     const inputNodes = nodes.filter(n => n.type === 'Input');
     if (inputNodes.length === 0) errs.push('Add at least one Input block.');
     if (inputNodes.length > 1) errs.push('Only one Input block is allowed.');
-    if (!nodes.some(n => OPTIMIZER_TYPES.has(n.type))) errs.push('Add an Optimizer block (SGD or Adam).');
-    if (!nodes.some(n => LOSS_TYPES.has(n.type))) errs.push('Add a Loss block (MSELoss or CrossEntropyLoss).');
     if (errs.length > 0) { setErrors(errs); return; }
     setErrors([]);
 
@@ -541,8 +537,6 @@ export default function MLArchitectureBuilder() {
   // ── Derived values ────────────────────────────────────────────────────────
 
   const selectedNodes = nodes.filter(n => selectedIds.includes(n.id));
-  const optimizerNode = nodes.find(n => OPTIMIZER_TYPES.has(n.type)) ?? null;
-  const lossNode = nodes.find(n => LOSS_TYPES.has(n.type)) ?? null;
   const canGroup = selectedIds.length >= 2;
 
   if (isPending) {
@@ -650,8 +644,6 @@ export default function MLArchitectureBuilder() {
                   Group {selectedIds.length}
                 </button>
               )}
-              <StatusBadge label={optimizerNode ? optimizerNode.type : 'No Optimizer'} active={!!optimizerNode} />
-              <StatusBadge label={lossNode ? lossNode.type : 'No Loss'} active={!!lossNode} />
               <div style={{ width: 1, height: 16, backgroundColor: '#1e1e1e' }} />
               <button
                 onClick={handleGenerate}

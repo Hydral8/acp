@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { BlockCategory, BLOCK_DEFS, CATEGORY_COLORS, CATEGORY_LABELS, CompositeBlock } from '../types';
 
-const CATEGORIES: BlockCategory[] = ['composite', 'core', 'activation', 'structural', 'training'];
+const CATEGORIES: BlockCategory[] = ['composite', 'core', 'activation', 'structural'];
 
 interface Props {
   customBlocks?: CompositeBlock[];
