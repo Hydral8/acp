@@ -249,7 +249,7 @@ export default function MLArchitectureBuilder() {
     saveTimerRef.current = setTimeout(() => {
       const graph = {
         nodes: nodes.map(n => ({
-          id: n.id, type: n.type, parameters: n.parameters,
+          id: n.id, type: n.type, x: n.x, y: n.y, parameters: n.parameters,
           codeOverride: n.codeOverride,
           composite: n.composite ? {
             label: n.composite.label,
@@ -721,6 +721,23 @@ export default function MLArchitectureBuilder() {
                 }}
               >
                 {simRunning ? 'Stop' : 'Run Dummy'}
+              </button>
+              <button
+                disabled
+                title="Training not yet implemented"
+                style={{
+                  padding: '5px 12px',
+                  backgroundColor: '#111',
+                  border: '1px solid #1e1e1e',
+                  borderRadius: 5,
+                  color: '#2a2a2a',
+                  cursor: 'not-allowed',
+                  fontSize: 11,
+                  fontWeight: 600,
+                  letterSpacing: 0.3,
+                }}
+              >
+                Run
               </button>
             </>
           )}
