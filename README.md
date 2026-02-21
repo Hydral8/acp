@@ -35,7 +35,7 @@ Requirements:
 
 Inputs (high level):
 
-- `apiKey` (required)
+- `apiKey` (required unless `RUNPOD_API_KEY` is set)
 - `gpuType` (required)
 - `imageName` or `templateId` (required)
 - Optional flags like `gpuCount`, `secureCloud`, `communityCloud`, `volumeSize`, `env`, `ports`

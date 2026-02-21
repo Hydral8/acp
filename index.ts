@@ -306,10 +306,13 @@ server.tool(
   {
     name: "runpod-login-deploy",
     description:
-      "Configure runpodctl with an API key, create a Runpod Pod, and (by default) ensure an SSH key is added.",
+      "Configure runpodctl with an API key (from input or .env), create a Runpod Pod, and (by default) ensure an SSH key is added.",
     schema: z
       .object({
-        apiKey: z.string().describe("Runpod API key"),
+        apiKey: z
+          .string()
+          .optional()
+          .describe("Runpod API key (optional if RUNPOD_API_KEY is set)"),
         apiUrl: z
           .string()
           .optional()
@@ -395,7 +398,18 @@ server.tool(
     }),
   },
   async (input) => {
-    const configArgs = ["config", "--apiKey", input.apiKey];
+    const apiKey =
+      input.apiKey ??
+      process.env.RUNPOD_API_KEY ??
+      process.env.RUNPOD_APIKEY ??
+      process.env.RUNPOD_KEY;
+    if (!apiKey) {
+      throw new Error(
+        "Missing Runpod API key. Provide apiKey or set RUNPOD_API_KEY in .env."
+      );
+    }
+
+    const configArgs = ["config", "--apiKey", apiKey];
     if (input.apiUrl) {
       configArgs.push("--apiUrl", input.apiUrl);
     }
@@ -933,6 +947,9 @@ server.tool(
     outputSchema: z.object({ modelPy: z.string(), dataPy: z.string(), trainPy: z.string(), summary: z.string() }),
   },
   async ({ dataset, taskType, optimizer, loss, hyperparams }) => {
+    console.info(
+      `[generate-training-code] pid=${process.pid} at=${new Date().toISOString()} dataset=${dataset?.name ?? 'unknown'} source=${dataset?.source ?? 'unknown'} taskType=${taskType ?? 'unknown'} optimizer=${optimizer} loss=${loss}`
+    );
     const graph = savedDesign;
     const modelPy = graph ? generatePyTorchCode(graph as GraphInput) : '# No model design found. Build one with design-architecture first.\n';
     const dataPy  = generateDataPy(dataset, taskType ?? 'unknown', hyperparams.batch_size);
@@ -948,6 +965,18 @@ server.tool(
         generatedAt: new Date().toISOString(),
       },
     };
+    try {
+      await fs.mkdir(TRAINING_OUTPUT_DIR, { recursive: true });
+      await Promise.all([
+        fs.writeFile(TRAINING_FILES.model, modelPy, "utf8"),
+        fs.writeFile(TRAINING_FILES.data, dataPy, "utf8"),
+        fs.writeFile(TRAINING_FILES.train, trainPy, "utf8"),
+        fs.writeFile(TRAINING_FILES.meta, JSON.stringify(savedTrainingCode.meta, null, 2), "utf8"),
+      ]);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[generate-training-code] failed to persist to disk: ${message}`);
+    }
     return object({
       modelPy,
       dataPy,
@@ -975,8 +1004,22 @@ server.tool(
     }),
   },
   async ({ file = 'all' }) => {
+    console.info(
+      `[get-training-code] pid=${process.pid} at=${new Date().toISOString()} file=${file} hasSaved=${!!savedTrainingCode}`
+    );
     if (!savedTrainingCode) {
-      return object({ found: false });
+      try {
+        const [metaRaw, modelPy, dataPy, trainPy] = await Promise.all([
+          fs.readFile(TRAINING_FILES.meta, "utf8"),
+          fs.readFile(TRAINING_FILES.model, "utf8"),
+          fs.readFile(TRAINING_FILES.data, "utf8"),
+          fs.readFile(TRAINING_FILES.train, "utf8"),
+        ]);
+        const meta = JSON.parse(metaRaw) as SavedTrainingCode["meta"];
+        savedTrainingCode = { modelPy, dataPy, trainPy, meta };
+      } catch {
+        return object({ found: false });
+      }
     }
     const { modelPy, dataPy, trainPy, meta } = savedTrainingCode;
     return object({
@@ -1965,6 +2008,20 @@ interface SavedTrainingCode {
   };
 }
 let savedTrainingCode: SavedTrainingCode | null = null;
+const TRAINING_OUTPUT_DIR = path.join(process.cwd(), "generated_training");
+const TRAINING_FILES = {
+  model: path.join(TRAINING_OUTPUT_DIR, "model.py"),
+  data: path.join(TRAINING_OUTPUT_DIR, "data.py"),
+  train: path.join(TRAINING_OUTPUT_DIR, "train.py"),
+  meta: path.join(TRAINING_OUTPUT_DIR, "training_meta.json"),
+};
+const TRAINING_OUTPUT_DIR = path.join(process.cwd(), "generated_training");
+const TRAINING_FILES = {
+  model: path.join(TRAINING_OUTPUT_DIR, "model.py"),
+  data: path.join(TRAINING_OUTPUT_DIR, "data.py"),
+  train: path.join(TRAINING_OUTPUT_DIR, "train.py"),
+  meta: path.join(TRAINING_OUTPUT_DIR, "training_meta.json"),
+};
 
 // ── Tool: design-architecture ──────────────────────────────────────────────
 
