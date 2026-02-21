@@ -1986,13 +1986,6 @@ const TRAINING_FILES = {
   train: path.join(TRAINING_OUTPUT_DIR, "train.py"),
   meta: path.join(TRAINING_OUTPUT_DIR, "training_meta.json"),
 };
-const TRAINING_OUTPUT_DIR = path.join(process.cwd(), "generated_training");
-const TRAINING_FILES = {
-  model: path.join(TRAINING_OUTPUT_DIR, "model.py"),
-  data: path.join(TRAINING_OUTPUT_DIR, "data.py"),
-  train: path.join(TRAINING_OUTPUT_DIR, "train.py"),
-  meta: path.join(TRAINING_OUTPUT_DIR, "training_meta.json"),
-};
 
 // ── Tool: design-architecture ──────────────────────────────────────────────
 
