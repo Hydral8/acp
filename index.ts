@@ -70,6 +70,8 @@ const compositeSchema = z.object({
 const nodeSchema = z.object({
   id: z.string(),
   type: z.string(),
+  x: z.number().optional(),
+  y: z.number().optional(),
   parameters: z.record(z.string(), z.unknown()),
   composite: compositeSchema,
   codeOverride: z.string().optional(),
@@ -859,9 +861,24 @@ server.tool(
     const g = (graph && graph.nodes.length > 0) ? graph : savedDesign ?? null;
     const hasDesign = g !== null && g.nodes.length > 0;
 
+    // If nodes have no positions (older saves or externally supplied graphs),
+    // run autoLayout so nodes are spaced out instead of stacked at (0,0).
+    let layoutNodes = g?.nodes ?? [];
+    if (hasDesign) {
+      const needsLayout = layoutNodes.every(n => !n.x && !n.y);
+      if (needsLayout) {
+        const laid = autoLayout(
+          layoutNodes.map(n => ({ id: n.id, type: n.type, parameters: n.parameters })),
+          g!.edges.map(e => ({ from: e.sourceId, to: e.targetId }))
+        );
+        const posMap = new Map(laid.nodes.map(n => [n.id, { x: n.x, y: n.y }]));
+        layoutNodes = layoutNodes.map(n => ({ ...n, ...(posMap.get(n.id) ?? {}) }));
+      }
+    }
+
     return widget({
       props: hasDesign
-        ? { initialNodes: g!.nodes, initialEdges: g!.edges, initialMode: 'train' }
+        ? { initialNodes: layoutNodes, initialEdges: g!.edges, initialMode: 'train' }
         : { initialMode: 'train' },
       output: text(
         hasDesign
