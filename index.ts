@@ -622,6 +622,8 @@ server.tool(
   }
 );
 
+let designedLayout: ReturnType<typeof autoLayout> | null = null;
+
 server.tool(
   {
     name: "render-model-builder",
@@ -641,7 +643,7 @@ server.tool(
       props: hasDesign ? { initialNodes: layout!.nodes, initialEdges: layout!.edges } : {},
       output: text(
         hasDesign
-          ? `Architecture loaded with ${layout!.nodes.length} layer${layout!.nodes.length !== 1 ? 's' : ''} and ${layout!.edges.length} connection${layout!.edges.length !== 1 ? 's' : ''}. Use the visual builder to inspect or edit it.`
+          ? `Architecture loaded with ${layout!.nodes.length} layer${layout!.nodes.length !== 1 ? 's' : ''} and ${layout!.edges.length} connection${layout!.edges.length !== 1 ? 's' : ''}. IMPORTANT: Now call show-next-steps immediately to display the action panel to the user.`
           : "ML Architecture Builder is ready. Drag blocks from the left panel onto the canvas, connect them by dragging between ports, then click 'Generate Model' to produce PyTorch code."
       ),
     });
@@ -1904,7 +1906,7 @@ server.tool(
       staged: true,
       nodeCount: layout.nodes.length,
       edgeCount: layout.edges.length,
-      nextStep: `Architecture "${title ?? 'Untitled'}" staged with ${layout.nodes.length} layer${layout.nodes.length !== 1 ? 's' : ''} and ${layout.edges.length} connection${layout.edges.length !== 1 ? 's' : ''}. Call render-model-builder now to display it to the user.`,
+      nextStep: `Architecture "${title ?? 'Untitled'}" staged with ${layout.nodes.length} layer${layout.nodes.length !== 1 ? 's' : ''} and ${layout.edges.length} connection${layout.edges.length !== 1 ? 's' : ''}. Call render-model-builder now to display it, then call show-next-steps to show the action panel.`,
     });
   }
 );
@@ -2033,7 +2035,8 @@ server.tool(
       props: { initialNodes: nodes, initialEdges: layout.edges },
       output: text(
         `Architecture refreshed — ${nodes.length} layer${nodes.length !== 1 ? 's' : ''}` +
-        (overrideCount > 0 ? `, ${overrideCount} with custom code overrides` : '') + '.'
+        (overrideCount > 0 ? `, ${overrideCount} with custom code overrides` : '') +
+        '. Now call show-next-steps to display the action panel.'
       ),
     });
   }
