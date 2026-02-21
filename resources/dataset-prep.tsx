@@ -163,6 +163,10 @@ export default function DatasetPrep() {
   const [hfToken,   setHfToken]   = useState('');
   const [kaggleKey, setKaggleKey] = useState('');
 
+  // Loss + optimizer — seeded from AI suggestion, user-editable
+  const [loss,      setLoss]      = useState('CrossEntropyLoss');
+  const [optimizer, setOptimizer] = useState('Adam');
+
   // Hyperparameters
   const [lr,       setLr]       = useState('0.001');
   const [batchSz,  setBatchSz]  = useState('32');
@@ -189,12 +193,14 @@ export default function DatasetPrep() {
   const sugLoss        = !isPending ? (props.suggestedLoss ?? 'CrossEntropyLoss') : 'CrossEntropyLoss';
   const sugOptimizer   = !isPending ? (props.suggestedOptimizer ?? 'Adam') : 'Adam';
 
-  // Auto-select category from detected task
+  // Auto-select category / loss / optimizer from detected task (seed only once)
   useEffect(() => {
     if (isPending) return;
-    const sc = props.suggestedCategory;
-    if (sc) setCategory(sc);
-  }, [isPending, props.suggestedCategory]);
+    if (props.suggestedCategory) setCategory(props.suggestedCategory);
+    if (props.suggestedLoss)      setLoss(props.suggestedLoss);
+    if (props.suggestedOptimizer) setOptimizer(props.suggestedOptimizer);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPending]);
 
   // Auto-detect platform from URL
   useEffect(() => {
@@ -234,13 +240,13 @@ export default function DatasetPrep() {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const res = await callGenTraining({
         dataset: ds, taskType: taskType ?? 'unknown',
-        optimizer: sugOptimizer as 'Adam', loss: sugLoss as 'CrossEntropyLoss',
+        optimizer: optimizer as 'Adam', loss: loss as 'CrossEntropyLoss',
         hyperparams: { lr: parseFloat(lr) || 0.001, batch_size: parseInt(batchSz) || 32, epochs: parseInt(epochs) || 10 },
       } as any);
       const sc = res?.structuredContent as { modelPy?: string; dataPy?: string; trainPy?: string } | undefined;
       if (sc?.modelPy) { setFiles({ modelPy: sc.modelPy, dataPy: sc.dataPy ?? '', trainPy: sc.trainPy ?? '' }); setCodeTab('train'); }
     } catch { /* silent */ }
-  }, [inputTab, selected, customUrl, taskType, sugLoss, sugOptimizer, lr, batchSz, epochs, callGenTraining]);
+  }, [inputTab, selected, customUrl, taskType, loss, optimizer, lr, batchSz, epochs, callGenTraining]);
 
   const copyCode = useCallback(() => {
     if (!files) return;
@@ -438,8 +444,43 @@ export default function DatasetPrep() {
               </div>
             )}
 
+            {/* Training config — Loss + Optimizer */}
+            <div style={{ padding: '10px 12px 8px', borderTop: '1px solid #141414', flexShrink: 0 }}>
+              <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase' as const, fontWeight: 700, marginBottom: 8 }}>
+                Training Config
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+                {/* Loss selector */}
+                <div>
+                  <div style={{ fontSize: 9, color: '#484848', marginBottom: 3 }}>Loss Function</div>
+                  <select
+                    value={loss}
+                    onChange={e => setLoss(e.target.value)}
+                    style={{ width: '100%', padding: '5px 7px', backgroundColor: '#111', border: '1px solid #222', borderRadius: 4, color: '#d0d0d0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, cursor: 'pointer', appearance: 'none' as const }}
+                  >
+                    {['CrossEntropyLoss','BCEWithLogitsLoss','MSELoss','L1Loss','HuberLoss','NLLLoss','KLDivLoss','CTCLoss'].map(l => (
+                      <option key={l} value={l}>{l}</option>
+                    ))}
+                  </select>
+                </div>
+                {/* Optimizer selector */}
+                <div>
+                  <div style={{ fontSize: 9, color: '#484848', marginBottom: 3 }}>Optimizer</div>
+                  <select
+                    value={optimizer}
+                    onChange={e => setOptimizer(e.target.value)}
+                    style={{ width: '100%', padding: '5px 7px', backgroundColor: '#111', border: '1px solid #222', borderRadius: 4, color: '#d0d0d0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, cursor: 'pointer', appearance: 'none' as const }}
+                  >
+                    {['Adam','AdamW','SGD','RMSprop','Adadelta','Adagrad','LBFGS'].map(o => (
+                      <option key={o} value={o}>{o}</option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
             {/* Hyperparameters */}
-            <div style={{ padding: '10px 12px 6px', borderTop: '1px solid #141414', flexShrink: 0 }}>
+            <div style={{ padding: '6px 12px 6px', flexShrink: 0 }}>
               <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase' as const, fontWeight: 700, marginBottom: 8 }}>
                 Hyperparameters
               </div>
