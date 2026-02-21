@@ -88,16 +88,20 @@ server.tool(
 server.tool(
   {
     name: "generate-pytorch-code",
-    description: "Generate runnable PyTorch model code from a graph JSON produced by the architecture builder",
+    description: "Generate runnable PyTorch model code from a graph. If graph is omitted, uses the last saved design from the visual builder.",
     schema: z.object({
-      graph: graphSchema.describe("The architecture graph with nodes and edges"),
+      graph: graphSchema.optional().describe("Architecture graph (nodes + edges). Omit to use the current saved design."),
     }),
     outputSchema: z.object({
       code: z.string(),
       errors: z.array(z.string()),
     }),
   },
-  async ({ graph }) => {
+  async ({ graph: graphArg }) => {
+    const graph = (graphArg && graphArg.nodes.length > 0) ? graphArg : savedDesign;
+    if (!graph || graph.nodes.length === 0) {
+      return object({ code: "", errors: ["No architecture found — design one first."] });
+    }
     const errors = validateGraph(graph);
     if (errors.length > 0) {
       return object({ code: "", errors });
@@ -1470,6 +1474,61 @@ server.tool(
   }
 );
 
+// ── Tool: show-next-steps ──────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "show-next-steps",
+    description:
+      "Show a next-steps action panel after an architecture design is complete. " +
+      "The user can generate code, set up training, edit the architecture, or get an explanation — all from one widget.",
+    schema: z.object({}),
+    widget: {
+      name: "next-steps",
+      invoking: "Preparing next steps…",
+      invoked: "What would you like to do next?",
+    },
+  },
+  async () => {
+    const g = savedDesign;
+    if (!g || g.nodes.length === 0) {
+      return widget({
+        props: {
+          nodeCount: 0, edgeCount: 0,
+          taskType: null, taskDescription: null,
+          suggestedLoss: null, suggestedOptimizer: null,
+          layerSummary: [],
+        },
+        output: text("No architecture found — design one first, then try again."),
+      });
+    }
+
+    const task = detectTask(g);
+    const typeCounts = new Map<string, number>();
+    for (const n of g.nodes) typeCounts.set(n.type, (typeCounts.get(n.type) ?? 0) + 1);
+    const layerSummary = [...typeCounts.entries()]
+      .map(([type, count]) => ({ type, count }))
+      .sort((a, b) => b.count - a.count);
+
+    return widget({
+      props: {
+        nodeCount: g.nodes.length,
+        edgeCount: g.edges.length,
+        taskType: task.taskType,
+        taskDescription: task.description,
+        suggestedLoss: task.suggestedLoss,
+        suggestedOptimizer: task.suggestedOptimizer,
+        layerSummary,
+      },
+      output: text(
+        `Architecture has ${g.nodes.length} layers and ${g.edges.length} connections. ` +
+        `Detected task: ${task.description}. ` +
+        `Choose an action: generate PyTorch code, set up training, edit the architecture, or get an explanation.`
+      ),
+    });
+  }
+);
+
 // ── Prompt: architecture-workflow ─────────────────────────────────────────
 
 server.prompt(
@@ -1501,18 +1560,24 @@ Call \`render-model-builder\` with no arguments immediately after \`design-archi
 This is the step that actually displays the interactive visual builder to the user.
 **Do not skip this step. Do not ask the user before calling it.**
 
-## Step 5 — Iterative modifications
+## Step 5 — Show next steps ⬅ critical
+Immediately after \`render-model-builder\`, call \`show-next-steps\` to display an action panel.
+This gives the user clear options: generate code, set up training, edit the architecture, or get an explanation.
+**Do not skip this step. Always show next steps after rendering the architecture.**
+
+## Step 6 — Iterative modifications
 To modify an existing design:
 1. \`get-current-design\` — read the current canvas state (nodes + edges)
 2. \`design-architecture\` — call with the updated spec
 3. \`render-model-builder\` — display the updated design
+4. \`show-next-steps\` — show the action panel again
 
-## Step 6 — Generate code
-Call \`generate-pytorch-code\` with the graph from \`get-current-design\` to produce runnable PyTorch.
+## Step 7 — Generate code
+Call \`generate-pytorch-code\` (graph is optional — omit to use the saved design) to produce runnable PyTorch.
 
 ---
-**Summary of the mandatory two-step render sequence:**
-\`design-architecture\` → stage layout → \`render-model-builder\` → show to user
+**Summary of the mandatory three-step render sequence:**
+\`design-architecture\` → stage layout → \`render-model-builder\` → show builder → \`show-next-steps\` → action panel
 `)
 );
 
