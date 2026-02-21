@@ -2,7 +2,15 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { McpUseProvider, useWidget, type WidgetMetadata } from 'mcp-use/react';
 import { z } from 'zod';
 
-const propsSchema = z.object({});
+const modelNodeSchema = z.object({
+  id:    z.string(),
+  label: z.string(),
+  cat:   z.string(),
+});
+
+const propsSchema = z.object({
+  modelNodes: z.array(modelNodeSchema).optional(),
+});
 type Props = z.infer<typeof propsSchema>;
 
 export const widgetMetadata: WidgetMetadata = {
@@ -102,7 +110,7 @@ const EDGE_H = 22;
 // ── Main widget ───────────────────────────────────────────────────────────────
 
 export default function DatasetPrep() {
-  const { isPending } = useWidget<Props>();
+  const { props, isPending } = useWidget<Props>();
 
   // Dataset selection
   const [inputTab,  setInputTab]  = useState<'curated' | 'custom'>('curated');
@@ -118,7 +126,12 @@ export default function DatasetPrep() {
   const [animStep,   setAnimStep]   = useState(-1);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const demoNodes   = DEMO_GRAPHS[category];
+  // Use real model nodes from the graph if provided, otherwise fall back to demo
+  const customNodes = !isPending && props.modelNodes && props.modelNodes.length > 0
+    ? (props.modelNodes as DemoNode[])
+    : null;
+  const demoNodes   = customNodes ?? DEMO_GRAPHS[category];
+  const hasCustomGraph = !!customNodes;
   const accentColor = ACCENT[category];
 
   // Auto-detect platform from URL
@@ -367,6 +380,15 @@ export default function DatasetPrep() {
             {/* Sim controls */}
             <div style={{ height: 38, borderBottom: '1px solid #141414', display: 'flex', alignItems: 'center', padding: '0 14px', gap: 10, backgroundColor: '#080808', flexShrink: 0 }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: '#3a3a3a', letterSpacing: 0.5 }}>MODEL SIMULATION</span>
+              {hasCustomGraph ? (
+                <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 3, backgroundColor: '#0a1a0a', color: '#4ade80', border: '1px solid #166534', fontWeight: 700, letterSpacing: 0.3 }}>
+                  YOUR MODEL · {demoNodes.length} layers
+                </span>
+              ) : (
+                <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 3, backgroundColor: '#111', color: '#444', border: '1px solid #222', fontWeight: 600 }}>
+                  demo
+                </span>
+              )}
               <div style={{ flex: 1 }} />
               {simRunning ? (
                 <button onClick={stopSim} style={{ padding: '4px 12px', backgroundColor: '#1a0a0a', border: '1px solid #7f1d1d', borderRadius: 4, color: '#f87171', cursor: 'pointer', fontSize: 10, fontWeight: 700 }}>

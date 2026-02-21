@@ -106,27 +106,79 @@ server.tool(
   }
 );
 
+// ── Node metadata for simulation ─────────────────────────────────────────────
+
+const LAYER_LABELS: Record<string, string> = {
+  Input: 'Input', Linear: 'Linear', Conv2D: 'Conv2D', Flatten: 'Flatten',
+  BatchNorm: 'BatchNorm', Dropout: 'Dropout', LayerNorm: 'LayerNorm',
+  MultiHeadAttn: 'MultiHead Attn', Tokenizer: 'Tokenizer', Embedding: 'Embedding',
+  SinePE: 'Sine PE', RoPE: 'RoPE', LearnedPE: 'Learned PE',
+  ReLU: 'ReLU', GELU: 'GELU', Sigmoid: 'Sigmoid', Tanh: 'Tanh', Softmax: 'Softmax',
+  ResidualAdd: 'Residual Add', Concatenate: 'Concatenate',
+  TransformerBlock: 'Transformer', ConvBNReLU: 'Conv-BN-ReLU',
+  ResNetBlock: 'ResNet Block', MLPBlock: 'MLP Block', Custom: 'Custom',
+};
+
+const LAYER_CATS: Record<string, string> = {
+  Input: 'core', Linear: 'core', Conv2D: 'core', Flatten: 'core',
+  BatchNorm: 'core', Dropout: 'core', LayerNorm: 'core',
+  MultiHeadAttn: 'core', Tokenizer: 'core', Embedding: 'core',
+  SinePE: 'core', RoPE: 'core', LearnedPE: 'core',
+  ReLU: 'activation', GELU: 'activation', Sigmoid: 'activation',
+  Tanh: 'activation', Softmax: 'activation',
+  ResidualAdd: 'structural', Concatenate: 'structural',
+  TransformerBlock: 'composite', ConvBNReLU: 'composite',
+  ResNetBlock: 'composite', MLPBlock: 'composite', Custom: 'composite',
+};
+
 // ── Tool: prepare-train ────────────────────────────────────────────────────
 
 server.tool(
   {
     name: "prepare-train",
-    description: "Select a training dataset (curated or custom URL) and preview a dummy forward pass with data flowing through the model architecture",
-    schema: z.object({}),
+    description:
+      "Select a training dataset and preview data flowing through the model. " +
+      "Pass the graph from render-model-builder to animate the real architecture — " +
+      "omit it to use a demo graph.",
+    schema: z.object({
+      graph: graphSchema.optional().describe(
+        "Architecture graph from the model builder (nodes + edges). " +
+        "When provided the simulation shows the actual model layers."
+      ),
+    }),
     widget: {
       name: "dataset-prep",
       invoking: "Loading dataset setup…",
       invoked: "Dataset setup ready",
     },
   },
-  async () => {
+  async ({ graph }) => {
+    // Build the ordered node list for the widget simulation
+    let modelNodes: Array<{ id: string; label: string; cat: string }> = [];
+
+    if (graph && graph.nodes.length > 0) {
+      const layerNodes = graph.nodes.filter(n => !TRAINING_TYPES.has(n.type));
+      const layerEdges = graph.edges.filter(
+        e => layerNodes.some(n => n.id === e.sourceId) &&
+             layerNodes.some(n => n.id === e.targetId)
+      );
+      const sorted = topologicalSort(layerNodes, layerEdges);
+      modelNodes = sorted.map(n => ({
+        id:    n.id,
+        label: LAYER_LABELS[n.type] ?? n.type,
+        cat:   LAYER_CATS[n.type]   ?? 'core',
+      }));
+    }
+
     return widget({
-      props: {},
+      props: { modelNodes },
       output: text(
-        "Dataset preparation ready. " +
-        "Choose a curated dataset (LLM, VLM, or RL/RLHF) or paste a HuggingFace/Kaggle URL. " +
-        "Platform is auto-detected and the appropriate API key input will appear. " +
-        "Click 'Run Dummy Pass' to watch data flow through the model simulation."
+        modelNodes.length > 0
+          ? `Dataset preparation ready. Your ${modelNodes.length}-layer model is loaded into the simulation. ` +
+            "Choose a dataset, then click 'Run Dummy Pass' to watch data flow through your architecture."
+          : "Dataset preparation ready. " +
+            "Choose a curated dataset (LLM, VLM, or RL/RLHF) or paste a HuggingFace/Kaggle URL. " +
+            "Pass a graph to animate your real model architecture."
       ),
     });
   }
