@@ -1087,14 +1087,20 @@ function autoLayout(
     byRank.get(rr)!.push(n.id);
   }
 
-  const COL_W = NODE_W + 80;
-  const ROW_H = NODE_H + 40;
+  const COL_W = NODE_W + 60;   // horizontal spacing (for parallel branches)
+  const ROW_H = NODE_H + 50;   // vertical spacing between ranks
   const PAD   = 60;
 
   const posMap = new Map<string, { x: number; y: number }>();
   for (const [rr, ids] of byRank.entries()) {
+    // Centre parallel nodes horizontally when a rank has multiple items
+    const totalW = ids.length * COL_W - (COL_W - NODE_W);
+    const startX = PAD - totalW / 2 + NODE_W / 2;
     for (let i = 0; i < ids.length; i++) {
-      posMap.set(ids[i], { x: PAD + rr * COL_W, y: PAD + i * ROW_H });
+      posMap.set(ids[i], {
+        x: startX + i * COL_W,
+        y: PAD + rr * ROW_H,
+      });
     }
   }
 
