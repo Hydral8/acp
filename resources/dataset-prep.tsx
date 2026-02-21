@@ -1,15 +1,21 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { McpUseProvider, useWidget, type WidgetMetadata } from 'mcp-use/react';
+import { McpUseProvider, useWidget, useCallTool, type WidgetMetadata } from 'mcp-use/react';
 import { z } from 'zod';
 
 const modelNodeSchema = z.object({
   id:    z.string(),
   label: z.string(),
   cat:   z.string(),
+  shape: z.string().optional(),
 });
 
 const propsSchema = z.object({
-  modelNodes: z.array(modelNodeSchema).optional(),
+  modelNodes:          z.array(modelNodeSchema).optional(),
+  taskType:            z.string().nullable().optional(),
+  suggestedCategory:   z.enum(['llm','vlm','rlhf','cv','tabular']).nullable().optional(),
+  suggestedLoss:       z.string().optional(),
+  suggestedOptimizer:  z.string().optional(),
+  shapeAnnotations:    z.record(z.string(), z.string()).optional(),
 });
 type Props = z.infer<typeof propsSchema>;
 
@@ -35,7 +41,7 @@ interface DatasetDef {
   task: string;
 }
 
-const DATASETS: Record<'llm' | 'vlm' | 'rlhf', DatasetDef[]> = {
+const DATASETS: Record<'llm' | 'vlm' | 'rlhf' | 'cv' | 'tabular', DatasetDef[]> = {
   llm: [
     { id: 'tinystories', name: 'TinyStories', source: 'huggingface', hfId: 'roneneldan/TinyStories', description: 'Simple short stories for training small language models', size: '2.1 GB', task: 'Causal LM' },
     { id: 'openwebtext', name: 'OpenWebText', source: 'huggingface', hfId: 'Skylion007/openwebtext', description: 'Open replication of the WebText corpus used for GPT-2', size: '40 GB', task: 'Causal LM' },
@@ -54,13 +60,25 @@ const DATASETS: Record<'llm' | 'vlm' | 'rlhf', DatasetDef[]> = {
     { id: 'summarize', name: 'OpenAI Summarize', source: 'huggingface', hfId: 'openai/summarize_from_feedback', description: 'Human RLHF feedback on TL;DR summaries', size: '92 K pairs', task: 'RLHF' },
     { id: 'webgpt', name: 'WebGPT Comparisons', source: 'huggingface', hfId: 'openai/webgpt_comparisons', description: 'WebGPT answer quality comparison pairs', size: '19 K pairs', task: 'RLHF' },
   ],
+  cv: [
+    { id: 'mnist',      name: 'MNIST',              source: 'huggingface', hfId: 'ylecun/mnist',            description: '70 K handwritten digit images (28×28 grayscale), 10 classes', size: '11 MB',   task: 'Classification' },
+    { id: 'cifar10',    name: 'CIFAR-10',            source: 'huggingface', hfId: 'uoft-cs/cifar10',         description: '60 K color images (32×32, RGB), 10 classes',                 size: '163 MB',  task: 'Classification' },
+    { id: 'imagenet1k', name: 'ImageNet-1K',         source: 'huggingface', hfId: 'ILSVRC/imagenet-1k',      description: '1.28 M images across 1 000 classes (requires access)',        size: '150 GB',  task: 'Classification' },
+    { id: 'food101',    name: 'Food-101',            source: 'huggingface', hfId: 'ethz/food101',            description: '101 000 food images across 101 categories',                   size: '4.7 GB',  task: 'Classification' },
+  ],
+  tabular: [
+    { id: 'iris',       name: 'Iris',                source: 'huggingface', hfId: 'scikit-learn/iris',       description: '150 samples · 4 features · 3 flower species. Classic starter.', size: '< 1 MB',  task: 'Classification' },
+    { id: 'titanic',    name: 'Titanic',             source: 'huggingface', hfId: 'mstz/titanic',            description: 'Survival prediction from passenger demographics',               size: '< 1 MB',  task: 'Classification' },
+    { id: 'adult',      name: 'Adult Income',        source: 'huggingface', hfId: 'scikit-learn/adult-census-income', description: 'Census-based binary income classification (>50 K)',   size: '3.8 MB',  task: 'Classification' },
+    { id: 'california', name: 'California Housing',  source: 'huggingface', hfId: 'lhoestq/demo-wikipedia-stats', description: 'Median house value regression from census block features', size: '< 1 MB', task: 'Regression' },
+  ],
 };
 
 // ── Demo model graphs per training type ──────────────────────────────────────
 
 interface DemoNode { id: string; label: string; cat: 'core' | 'activation' | 'composite'; }
 
-const DEMO_GRAPHS: Record<'llm' | 'vlm' | 'rlhf', DemoNode[]> = {
+const DEMO_GRAPHS: Record<CatKey, DemoNode[]> = {
   llm: [
     { id: 'inp',  label: 'Input',          cat: 'core' },
     { id: 'emb',  label: 'Embedding',      cat: 'core' },
@@ -87,6 +105,24 @@ const DEMO_GRAPHS: Record<'llm' | 'vlm' | 'rlhf', DemoNode[]> = {
     { id: 'fc2',  label: 'Linear',    cat: 'core' },
     { id: 'sig',  label: 'Sigmoid',   cat: 'activation' },
   ],
+  cv: [
+    { id: 'inp',   label: 'Input',       cat: 'core' },
+    { id: 'conv1', label: 'Conv2D',      cat: 'core' },
+    { id: 'bn1',   label: 'BatchNorm',   cat: 'core' },
+    { id: 'relu1', label: 'ReLU',        cat: 'activation' },
+    { id: 'conv2', label: 'Conv2D',      cat: 'core' },
+    { id: 'flat',  label: 'Flatten',     cat: 'core' },
+    { id: 'fc',    label: 'Linear',      cat: 'core' },
+    { id: 'sm',    label: 'Softmax',     cat: 'activation' },
+  ],
+  tabular: [
+    { id: 'inp',  label: 'Input',   cat: 'core' },
+    { id: 'fc1',  label: 'Linear',  cat: 'core' },
+    { id: 'relu', label: 'ReLU',    cat: 'activation' },
+    { id: 'fc2',  label: 'Linear',  cat: 'core' },
+    { id: 'relu2',label: 'ReLU',    cat: 'activation' },
+    { id: 'out',  label: 'Linear',  cat: 'core' },
+  ],
 };
 
 const NODE_COLORS: Record<string, string> = {
@@ -95,13 +131,16 @@ const NODE_COLORS: Record<string, string> = {
   composite:  '#ca8a04',
 };
 
-const ACCENT:      Record<'llm' | 'vlm' | 'rlhf', string> = { llm: '#3b82f6', vlm: '#8b5cf6', rlhf: '#10b981' };
-const BLOB_ICON:   Record<'llm' | 'vlm' | 'rlhf', string> = { llm: '📝', vlm: '🖼️', rlhf: '🎯' };
-const BLOB_LABEL:  Record<'llm' | 'vlm' | 'rlhf', string> = { llm: 'Text Tokens', vlm: 'Image Patches', rlhf: 'Pref. Pairs' };
-const CAT_TABS: Array<{ key: 'llm' | 'vlm' | 'rlhf'; label: string }> = [
-  { key: 'llm',  label: 'LLM' },
-  { key: 'vlm',  label: 'VLM' },
-  { key: 'rlhf', label: 'RL / RLHF' },
+type CatKey = 'llm' | 'vlm' | 'rlhf' | 'cv' | 'tabular';
+const ACCENT:     Record<CatKey, string> = { llm: '#3b82f6', vlm: '#8b5cf6', rlhf: '#10b981', cv: '#f59e0b', tabular: '#06b6d4' };
+const BLOB_ICON:  Record<CatKey, string> = { llm: '📝', vlm: '🖼️', rlhf: '🎯', cv: '🖼', tabular: '📊' };
+const BLOB_LABEL: Record<CatKey, string> = { llm: 'Text Tokens', vlm: 'Image Patches', rlhf: 'Pref. Pairs', cv: 'Image Batch', tabular: 'Row Batch' };
+const CAT_TABS: Array<{ key: CatKey; label: string }> = [
+  { key: 'llm',     label: 'LLM' },
+  { key: 'vlm',     label: 'VLM' },
+  { key: 'rlhf',    label: 'RL/RLHF' },
+  { key: 'cv',      label: 'Vision' },
+  { key: 'tabular', label: 'Tabular' },
 ];
 
 const NODE_H = 38;
@@ -109,17 +148,30 @@ const EDGE_H = 22;
 
 // ── Main widget ───────────────────────────────────────────────────────────────
 
+interface GeneratedFiles { modelPy: string; dataPy: string; trainPy: string; }
+
 export default function DatasetPrep() {
   const { props, isPending } = useWidget<Props>();
+  const { callToolAsync: callGenTraining, isPending: isGenerating } = useCallTool('generate-training-code');
 
   // Dataset selection
   const [inputTab,  setInputTab]  = useState<'curated' | 'custom'>('curated');
-  const [category,  setCategory]  = useState<'llm' | 'vlm' | 'rlhf'>('llm');
+  const [category,  setCategory]  = useState<CatKey>('llm');
   const [selected,  setSelected]  = useState<DatasetDef | null>(null);
   const [customUrl, setCustomUrl] = useState('');
   const [platform,  setPlatform]  = useState<'huggingface' | 'kaggle' | null>(null);
   const [hfToken,   setHfToken]   = useState('');
   const [kaggleKey, setKaggleKey] = useState('');
+
+  // Hyperparameters
+  const [lr,       setLr]       = useState('0.001');
+  const [batchSz,  setBatchSz]  = useState('32');
+  const [epochs,   setEpochs]   = useState('10');
+
+  // Generated code output
+  const [files,    setFiles]    = useState<GeneratedFiles | null>(null);
+  const [codeTab,  setCodeTab]  = useState<'model' | 'data' | 'train'>('train');
+  const [copied,   setCopied]   = useState(false);
 
   // Animation
   const [simRunning, setSimRunning] = useState(false);
@@ -130,9 +182,19 @@ export default function DatasetPrep() {
   const customNodes = !isPending && props.modelNodes && props.modelNodes.length > 0
     ? (props.modelNodes as DemoNode[])
     : null;
-  const demoNodes   = customNodes ?? DEMO_GRAPHS[category];
+  const demoNodes      = customNodes ?? DEMO_GRAPHS[category];
   const hasCustomGraph = !!customNodes;
-  const accentColor = ACCENT[category];
+  const accentColor    = ACCENT[category];
+  const taskType       = !isPending ? (props.taskType ?? null) : null;
+  const sugLoss        = !isPending ? (props.suggestedLoss ?? 'CrossEntropyLoss') : 'CrossEntropyLoss';
+  const sugOptimizer   = !isPending ? (props.suggestedOptimizer ?? 'Adam') : 'Adam';
+
+  // Auto-select category from detected task
+  useEffect(() => {
+    if (isPending) return;
+    const sc = props.suggestedCategory;
+    if (sc) setCategory(sc);
+  }, [isPending, props.suggestedCategory]);
 
   // Auto-detect platform from URL
   useEffect(() => {
@@ -160,12 +222,33 @@ export default function DatasetPrep() {
 
   const startSim = useCallback(() => { setAnimStep(0); setSimRunning(true); }, []);
   const stopSim  = useCallback(() => {
-    setSimRunning(false);
-    setAnimStep(-1);
+    setSimRunning(false); setAnimStep(-1);
     if (timerRef.current) clearTimeout(timerRef.current);
   }, []);
 
-  const canPrepare = inputTab === 'curated' ? !!selected : !!customUrl.trim();
+  const handleGenerate = useCallback(async () => {
+    const ds = inputTab === 'curated' && selected
+      ? { name: selected.name, source: 'huggingface' as const, hfId: selected.hfId }
+      : { name: customUrl || 'custom', source: 'custom' as const };
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const res = await callGenTraining({
+        dataset: ds, taskType: taskType ?? 'unknown',
+        optimizer: sugOptimizer as 'Adam', loss: sugLoss as 'CrossEntropyLoss',
+        hyperparams: { lr: parseFloat(lr) || 0.001, batch_size: parseInt(batchSz) || 32, epochs: parseInt(epochs) || 10 },
+      } as any);
+      const sc = res?.structuredContent as { modelPy?: string; dataPy?: string; trainPy?: string } | undefined;
+      if (sc?.modelPy) { setFiles({ modelPy: sc.modelPy, dataPy: sc.dataPy ?? '', trainPy: sc.trainPy ?? '' }); setCodeTab('train'); }
+    } catch { /* silent */ }
+  }, [inputTab, selected, customUrl, taskType, sugLoss, sugOptimizer, lr, batchSz, epochs, callGenTraining]);
+
+  const copyCode = useCallback(() => {
+    if (!files) return;
+    const content = codeTab === 'model' ? files.modelPy : codeTab === 'data' ? files.dataPy : files.trainPy;
+    navigator.clipboard.writeText(content).then(() => { setCopied(true); setTimeout(() => setCopied(false), 1600); });
+  }, [files, codeTab]);
+
+  const canGenerate = (inputTab === 'curated' ? !!selected : !!customUrl.trim()) && !isGenerating;
 
   if (isPending) {
     return (
@@ -355,30 +438,59 @@ export default function DatasetPrep() {
               </div>
             )}
 
-            {/* Prepare button */}
-            <div style={{ padding: '10px 12px', borderTop: '1px solid #141414', flexShrink: 0 }}>
+            {/* Hyperparameters */}
+            <div style={{ padding: '10px 12px 6px', borderTop: '1px solid #141414', flexShrink: 0 }}>
+              <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase' as const, fontWeight: 700, marginBottom: 8 }}>
+                Hyperparameters
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
+                {([
+                  { label: 'Learning Rate', value: lr, set: setLr },
+                  { label: 'Batch Size', value: batchSz, set: setBatchSz },
+                ] as const).map(({ label, value, set }) => (
+                  <div key={label}>
+                    <div style={{ fontSize: 9, color: '#484848', marginBottom: 3 }}>{label}</div>
+                    <input
+                      type="text" value={value} onChange={e => set(e.target.value)}
+                      style={{ width: '100%', padding: '5px 7px', backgroundColor: '#111', border: '1px solid #222', borderRadius: 4, color: '#d0d0d0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, fontFamily: 'monospace' }}
+                    />
+                  </div>
+                ))}
+              </div>
+              <div>
+                <div style={{ fontSize: 9, color: '#484848', marginBottom: 3 }}>Epochs</div>
+                <input
+                  type="text" value={epochs} onChange={e => setEpochs(e.target.value)}
+                  style={{ width: '100%', padding: '5px 7px', backgroundColor: '#111', border: '1px solid #222', borderRadius: 4, color: '#d0d0d0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, fontFamily: 'monospace' }}
+                />
+              </div>
+            </div>
+
+            {/* Generate button */}
+            <div style={{ padding: '8px 12px 10px', flexShrink: 0 }}>
               <button
-                disabled={!canPrepare}
+                disabled={!canGenerate}
+                onClick={handleGenerate}
                 style={{
                   width: '100%', padding: '9px 0',
-                  backgroundColor: canPrepare ? '#1a1200' : '#0d0d0d',
-                  border: `1px solid ${canPrepare ? '#ca8a04' : '#1a1a1a'}`,
+                  backgroundColor: isGenerating ? '#0d0d0d' : canGenerate ? '#0a1a2a' : '#0d0d0d',
+                  border: `1px solid ${isGenerating ? '#1d4ed8' : canGenerate ? '#3b82f6' : '#1a1a1a'}`,
                   borderRadius: 6,
-                  color: canPrepare ? '#fde68a' : '#2a2a2a',
-                  cursor: canPrepare ? 'pointer' : 'not-allowed',
+                  color: isGenerating ? '#60a5fa' : canGenerate ? '#93c5fd' : '#2a2a2a',
+                  cursor: canGenerate ? 'pointer' : 'not-allowed',
                   fontSize: 11, fontWeight: 700, letterSpacing: 0.4,
-                  transition: 'border-color 0.15s, color 0.15s',
+                  transition: 'all 0.15s',
                 }}
               >
-                ▶ Prepare Dataset
+                {isGenerating ? '⟳ Generating…' : '⚡ Generate Training Scripts'}
               </button>
             </div>
           </div>
 
-          {/* RIGHT: Model simulation ──────────────────────────────────────── */}
+          {/* RIGHT: Model simulation + code output ───────────────────────── */}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
             {/* Sim controls */}
-            <div style={{ height: 38, borderBottom: '1px solid #141414', display: 'flex', alignItems: 'center', padding: '0 14px', gap: 10, backgroundColor: '#080808', flexShrink: 0 }}>
+            <div style={{ height: 38, borderBottom: '1px solid #141414', display: 'flex', alignItems: 'center', padding: '0 14px', gap: 8, backgroundColor: '#080808', flexShrink: 0 }}>
               <span style={{ fontSize: 11, fontWeight: 700, color: '#3a3a3a', letterSpacing: 0.5 }}>MODEL SIMULATION</span>
               {hasCustomGraph ? (
                 <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 3, backgroundColor: '#0a1a0a', color: '#4ade80', border: '1px solid #166534', fontWeight: 700, letterSpacing: 0.3 }}>
@@ -389,6 +501,16 @@ export default function DatasetPrep() {
                   demo
                 </span>
               )}
+              {taskType && (
+                <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 3, backgroundColor: '#0a1628', color: '#60a5fa', border: '1px solid #1d4ed8', fontWeight: 700, letterSpacing: 0.3 }}>
+                  {taskType}
+                </span>
+              )}
+              {sugLoss && sugLoss !== 'CrossEntropyLoss' || sugOptimizer && sugOptimizer !== 'Adam' ? (
+                <span style={{ fontSize: 9, color: '#333' }}>
+                  {sugLoss} · {sugOptimizer}
+                </span>
+              ) : null}
               <div style={{ flex: 1 }} />
               {simRunning ? (
                 <button onClick={stopSim} style={{ padding: '4px 12px', backgroundColor: '#1a0a0a', border: '1px solid #7f1d1d', borderRadius: 4, color: '#f87171', cursor: 'pointer', fontSize: 10, fontWeight: 700 }}>
@@ -402,14 +524,51 @@ export default function DatasetPrep() {
             </div>
 
             {/* Simulation canvas */}
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflowY: 'auto', padding: '20px 24px' }}>
+            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflowY: 'auto', padding: '16px 24px', minHeight: 0 }}>
               <SimulationView
                 nodes={demoNodes}
                 animStep={animStep}
                 simRunning={simRunning}
                 category={category}
+                shapeAnnotations={!isPending ? (props.shapeAnnotations ?? {}) : {}}
               />
             </div>
+
+            {/* Code output panel — shown after generation */}
+            {files && (
+              <div style={{ height: 210, borderTop: '1px solid #141414', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+                {/* Tabs + copy */}
+                <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #141414', backgroundColor: '#080808', flexShrink: 0 }}>
+                  {(['model', 'data', 'train'] as const).map(tab => (
+                    <button key={tab} onClick={() => setCodeTab(tab)} style={{
+                      padding: '7px 14px', background: 'none', border: 'none',
+                      borderBottom: `2px solid ${codeTab === tab ? '#3b82f6' : 'transparent'}`,
+                      color: codeTab === tab ? '#93c5fd' : '#444',
+                      cursor: 'pointer', fontSize: 10, fontWeight: 700, letterSpacing: 0.3,
+                    }}>
+                      {tab === 'model' ? 'model.py' : tab === 'data' ? 'data.py' : 'train.py'}
+                    </button>
+                  ))}
+                  <div style={{ flex: 1 }} />
+                  <button onClick={copyCode} style={{
+                    padding: '4px 12px', margin: '0 8px',
+                    backgroundColor: copied ? '#0a1a0a' : '#111',
+                    border: `1px solid ${copied ? '#166534' : '#222'}`,
+                    borderRadius: 4, color: copied ? '#4ade80' : '#555',
+                    cursor: 'pointer', fontSize: 9, fontWeight: 700,
+                    transition: 'all 0.2s',
+                  }}>
+                    {copied ? '✓ Copied' : 'Copy'}
+                  </button>
+                </div>
+                {/* Code scroll */}
+                <div style={{ flex: 1, overflowY: 'auto', padding: '10px 14px', backgroundColor: '#060606' }}>
+                  <pre style={{ margin: 0, fontSize: 10, color: '#9ca3af', fontFamily: 'monospace', lineHeight: 1.6, whiteSpace: 'pre-wrap' as const, wordBreak: 'break-word' as const }}>
+                    {codeTab === 'model' ? files.modelPy : codeTab === 'data' ? files.dataPy : files.trainPy}
+                  </pre>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -420,12 +579,13 @@ export default function DatasetPrep() {
 // ── Simulation view ───────────────────────────────────────────────────────────
 
 function SimulationView({
-  nodes, animStep, simRunning, category,
+  nodes, animStep, simRunning, category, shapeAnnotations,
 }: {
   nodes: DemoNode[];
   animStep: number;
   simRunning: boolean;
-  category: 'llm' | 'vlm' | 'rlhf';
+  category: CatKey;
+  shapeAnnotations: Record<string, string>;
 }) {
   const accent    = ACCENT[category];
   const totalH    = nodes.length * NODE_H + (nodes.length - 1) * EDGE_H;
@@ -589,22 +749,35 @@ function SimulationView({
                 transition: 'background-color 0.22s, box-shadow 0.22s',
               }} />
 
-              {/* Label */}
-              <span style={{
-                fontSize: 11,
-                fontWeight: isActive ? 700 : 400,
-                color: isActive ? '#ffffff' : isPast ? `${nodeColor}99` : '#3a3a3a',
-                transition: 'color 0.22s',
-                flex: 1,
-              }}>
-                {node.label}
-              </span>
+              {/* Label + shape */}
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <span style={{
+                  fontSize: 11,
+                  fontWeight: isActive ? 700 : 400,
+                  color: isActive ? '#ffffff' : isPast ? `${nodeColor}99` : '#3a3a3a',
+                  transition: 'color 0.22s',
+                  display: 'block',
+                }}>
+                  {node.label}
+                </span>
+                {shapeAnnotations[node.id] && (
+                  <span style={{
+                    fontSize: 8, fontFamily: 'monospace',
+                    color: isActive ? `${nodeColor}cc` : '#2a2a2a',
+                    transition: 'color 0.22s',
+                    letterSpacing: 0.2,
+                  }}>
+                    {shapeAnnotations[node.id]}
+                  </span>
+                )}
+              </div>
 
               {/* Activity indicator */}
               {isActive && (
                 <span style={{
                   fontSize: 8, color: nodeColor, fontWeight: 700, letterSpacing: 2,
                   animation: 'nodePulse 0.55s ease-in-out infinite',
+                  flexShrink: 0,
                 }}>
                   ●●●
                 </span>
