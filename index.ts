@@ -806,53 +806,24 @@ server.tool(
       ),
     }),
     widget: {
-      name: "dataset-prep",
-      invoking: "Loading dataset setup…",
-      invoked: "Dataset setup ready",
+      name: "ml-architecture-builder",
+      invoking: "Loading training setup…",
+      invoked: "Training setup ready",
     },
   },
   async ({ graph }) => {
     // Use provided graph, or fall back to savedDesign, or empty
     const g = (graph && graph.nodes.length > 0) ? graph : savedDesign ?? null;
-
-    let modelNodes: Array<{ id: string; label: string; cat: string }> = [];
-    let taskInfo: TaskAnalysis | null = null;
-    let shapeAnnotations: Record<string, string> = {};
-
-    if (g && g.nodes.length > 0) {
-      taskInfo = detectTask(g as GraphInput);
-      shapeAnnotations = computeShapeAnnotations(g as GraphInput);
-
-      const layerNodes = g.nodes.filter(n => !TRAINING_TYPES.has(n.type));
-      const layerEdges = g.edges.filter(
-        e => layerNodes.some(n => n.id === e.sourceId) &&
-             layerNodes.some(n => n.id === e.targetId)
-      );
-      const sorted = topologicalSort(layerNodes as NodeInput[], layerEdges as EdgeInput[]);
-      modelNodes = sorted.map(n => ({
-        id:    n.id,
-        label: LAYER_LABELS[n.type] ?? n.type,
-        cat:   LAYER_CATS[n.type]   ?? 'core',
-        shape: shapeAnnotations[n.id] ?? '',
-      }));
-    }
+    const hasDesign = g !== null && g.nodes.length > 0;
 
     return widget({
-      props: {
-        modelNodes,
-        taskType:          taskInfo?.taskType          ?? null,
-        suggestedCategory: taskInfo?.category          ?? null,
-        suggestedLoss:     taskInfo?.suggestedLoss     ?? 'CrossEntropyLoss',
-        suggestedOptimizer:taskInfo?.suggestedOptimizer ?? 'Adam',
-        shapeAnnotations,
-      },
+      props: hasDesign
+        ? { initialNodes: g!.nodes, initialEdges: g!.edges, initialMode: 'train' }
+        : { initialMode: 'train' },
       output: text(
-        taskInfo
-          ? `Training setup ready. Detected: ${taskInfo.description}. ` +
-            `${modelNodes.length} layers loaded. Suggested loss: ${taskInfo.suggestedLoss}, ` +
-            `optimizer: ${taskInfo.suggestedOptimizer}. ` +
-            "Adjust the dataset and hyperparameters in the widget, then generate training scripts."
-          : "Training setup ready. No model design found — build an architecture first with design-architecture + render-model-builder."
+        hasDesign
+          ? `Training setup ready. ${g!.nodes.length} layer architecture loaded — switch to Train tab to pick a dataset and generate scripts.`
+          : "Training setup opened. No model design found — build an architecture first in Design mode, then switch to Train."
       ),
     });
   }
