@@ -1037,7 +1037,7 @@ interface TrainBodyProps {
 function TrainBody({
   trainSortedNodes, shapeMap,
   trainCategory, setTrainCategory,
-  trainSelected, setTrainSelected,
+  trainSelected, onSelectDataset,
   trainLoss, setTrainLoss,
   trainOptimizer, setTrainOptimizer,
   trainLR, setTrainLR,
@@ -1097,7 +1097,7 @@ function TrainBody({
             return (
               <div
                 key={ds.id}
-                onClick={() => setTrainSelected(sel ? null : ds)}
+                onClick={() => onSelectDataset(sel ? null : ds)}
                 style={{
                   padding: '7px 8px',
                   marginBottom: 4,
