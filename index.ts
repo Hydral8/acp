@@ -892,8 +892,8 @@ server.tool(
         torchvisionName: z.string().optional().describe("torchvision class name, e.g. 'MNIST', 'CIFAR10'"),
       }),
       taskType: z.string().optional().describe("Detected task type from prepare-train"),
-      optimizer: z.enum(['Adam', 'AdamW', 'SGD', 'RMSprop']).describe("Optimizer to use"),
-      loss: z.enum(['CrossEntropyLoss', 'MSELoss', 'BCEWithLogitsLoss', 'NLLLoss']).describe("Loss function"),
+      optimizer: z.enum(['Adam', 'AdamW', 'SGD', 'RMSprop', 'Adadelta', 'Adagrad', 'LBFGS']).describe("Optimizer to use"),
+      loss: z.enum(['CrossEntropyLoss', 'MSELoss', 'BCEWithLogitsLoss', 'NLLLoss', 'L1Loss', 'HuberLoss', 'KLDivLoss', 'CTCLoss']).describe("Loss function"),
       hyperparams: z.object({
         lr:           z.number().describe("Learning rate"),
         batch_size:   z.number().describe("Batch size"),
@@ -908,11 +908,54 @@ server.tool(
     const modelPy = graph ? generatePyTorchCode(graph as GraphInput) : '# No model design found. Build one with design-architecture first.\n';
     const dataPy  = generateDataPy(dataset, taskType ?? 'unknown', hyperparams.batch_size);
     const trainPy = generateTrainPy(optimizer, loss, hyperparams);
+    // Persist on server so get-training-code can retrieve it later
+    savedTrainingCode = {
+      modelPy, dataPy, trainPy,
+      meta: {
+        dataset: dataset.name,
+        optimizer,
+        loss,
+        taskType: taskType ?? 'unknown',
+        generatedAt: new Date().toISOString(),
+      },
+    };
     return object({
       modelPy,
       dataPy,
       trainPy,
-      summary: `Generated model.py (${modelPy.split('\n').length} lines), data.py (${dataPy.split('\n').length} lines), train.py (${trainPy.split('\n').length} lines).`,
+      summary: `Generated and saved model.py (${modelPy.split('\n').length} lines), data.py (${dataPy.split('\n').length} lines), train.py (${trainPy.split('\n').length} lines). Use get-training-code to retrieve them again.`,
+    });
+  }
+);
+
+// ── Tool: get-training-code ─────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'get-training-code',
+    description: 'Retrieve the most recently generated training scripts (model.py, data.py, train.py) that were saved by generate-training-code.',
+    schema: z.object({
+      file: z.enum(['model', 'data', 'train', 'all']).optional().describe("Which file to return. Omit or use 'all' for all three."),
+    }),
+    outputSchema: z.object({
+      modelPy: z.string().optional(),
+      dataPy:  z.string().optional(),
+      trainPy: z.string().optional(),
+      meta:    z.object({ dataset: z.string(), optimizer: z.string(), loss: z.string(), taskType: z.string(), generatedAt: z.string() }).optional(),
+      found:   z.boolean(),
+    }),
+  },
+  async ({ file = 'all' }) => {
+    if (!savedTrainingCode) {
+      return object({ found: false });
+    }
+    const { modelPy, dataPy, trainPy, meta } = savedTrainingCode;
+    return object({
+      found: true,
+      meta,
+      modelPy: file === 'all' || file === 'model' ? modelPy : undefined,
+      dataPy:  file === 'all' || file === 'data'  ? dataPy  : undefined,
+      trainPy: file === 'all' || file === 'train' ? trainPy : undefined,
     });
   }
 );
@@ -1879,6 +1922,21 @@ server.tool(
 // ── Server-side in-memory design storage (latest save from widget) ─────────
 let savedDesign: z.infer<typeof graphSchema> | null = null;
 
+// ── Server-side training script storage ─────────────────────────────────────
+interface SavedTrainingCode {
+  modelPy: string;
+  dataPy: string;
+  trainPy: string;
+  meta: {
+    dataset: string;
+    optimizer: string;
+    loss: string;
+    taskType: string;
+    generatedAt: string;
+  };
+}
+let savedTrainingCode: SavedTrainingCode | null = null;
+
 // ── Tool: design-architecture ──────────────────────────────────────────────
 
 server.tool(
@@ -2116,10 +2174,59 @@ Read \`layer-builder://guide\` to understand how custom layer types integrate wi
 - \`create-block-type\` — define a new atomic layer type (name, params, category, connection rules)
 - \`create-custom-block\` — define a named composite from existing layers (sub-graph)
 
-## Step 3 — Design the architecture
+## Step 3 — Design the architecture ← shape integrity AND training config are CRITICAL here
 Call \`design-architecture\` with:
 - \`nodes\`: list of layers, each with an \`id\` and \`type\` (and optional \`parameters\` overrides)
 - \`edges\`: list of connections as \`{ from, to }\` pairs referencing node ids
+
+### Choose a suitable loss function and optimizer based on the task
+Decide these **before** designing, and tell the user your reasoning:
+
+| Task | Loss | Optimizer | Notes |
+|------|------|-----------|-------|
+| Multi-class classification | CrossEntropyLoss | Adam / AdamW | Output layer: Linear → (Softmax optional, CE includes it) |
+| Binary classification | BCEWithLogitsLoss | Adam | Output layer: Linear with 1 unit, no Sigmoid (loss includes it) |
+| Regression | MSELoss or HuberLoss | Adam / SGD | HuberLoss is robust to outliers |
+| Language modelling (causal LM) | CrossEntropyLoss | AdamW | Shift labels by 1; use weight decay |
+| Sequence-to-sequence / translation | CrossEntropyLoss or CTCLoss | AdamW | CTC for alignmentfree tasks |
+| RLHF / reward model | BCEWithLogitsLoss | AdamW | Pairwise preference pairs |
+| Self-supervised / contrastive | KLDivLoss or custom | AdamW | Output is log-softmax for KLDiv |
+| Tabular regression | MSELoss | Adam | Scale targets to [0,1] for stability |
+| Tabular classification | CrossEntropyLoss | Adam or SGD | |
+
+**Always tell the user:** which loss and optimizer you chose and why, so they can override in the training setup widget.
+
+**Before finalising the node list you MUST verify that every dimension matches end-to-end:**
+
+### Shape integrity rules (enforce these — the system will flag mismatches visually)
+
+| Transition | What must match |
+|------------|----------------|
+| Any layer → Linear | \`in_features\` must equal the last dim of the upstream output |
+| Any layer → Conv2D / ConvBNReLU | \`in_channels\` must equal the channel dim of the upstream output |
+| Any layer → BatchNorm | \`num_features\` must equal channel dim (dim 1 for 4-D, dim 0 for 3-D) |
+| Any layer → LayerNorm | \`normalized_shape\` must equal the last dim of the upstream output |
+| Any layer → MultiHeadAttn | \`embed_dim\` must equal the last dim of the upstream output |
+| Any layer → TransformerBlock | \`d_model\` must equal the last dim of the upstream output |
+| Embedding → subsequent layers | Embedding adds a new last dim (\`embedding_dim\`); next layer must expect \`[..., embedding_dim]\` |
+| Conv2D → Flatten → Linear | After Flatten(start_dim=1) with input \`[C, H, W]\`, Linear \`in_features\` must be \`C * H * W\` |
+| ResNetBlock | \`channels\` must match the channel dim of the input |
+
+### Shape propagation walkthrough — always do this mentally
+For each node in topological order, compute the output shape, then verify the next node's parameters accept it:
+1. **Input / Tokenizer** — defines the root shape (e.g. \`[512]\` tokens, \`[3, 224, 224]\` image)
+2. **Embedding** — appends \`embedding_dim\` → \`[seq, embed_dim]\`
+3. **Linear(in, out)** — replaces last dim: \`[..., in] → [..., out]\`. Set \`in_features = last dim of upstream\`
+4. **Conv2D(in_ch, out_ch, k, s, p)** — replaces channel dim and spatial dims: \`[C,H,W] → [out_ch, (H+2p-k)/s+1, (W+2p-k)/s+1]\`
+5. **Flatten(start_dim=1)** — collapses dims ≥ start_dim: \`[C,H,W] → [C*H*W]\`
+6. **Passthrough layers** (ReLU, GELU, Dropout, LayerNorm, MultiHeadAttn, SinePE, RoPE, TransformerBlock etc.) — output shape = input shape
+
+### Common mistakes to avoid
+- Setting Linear \`in_features\` to the wrong value after a Flatten — always calculate \`C * H * W\` explicitly
+- Forgetting that Conv2D changes spatial dimensions — a 28×28 image through Conv2D(k=3,s=1,p=0) becomes 26×26
+- Mismatched channel counts between consecutive Conv2D layers — \`out_channels\` of layer N must equal \`in_channels\` of layer N+1
+- Using BatchNorm \`num_features\` that doesn't match the channel count
+- Stacking two Linear layers without checking the inner dimension
 
 This computes the layout and stages it server-side. It does NOT show any visual yet.
 
@@ -2136,16 +2243,23 @@ This gives the user clear options: generate code, set up training, edit the arch
 ## Step 6 — Iterative modifications
 To modify an existing design:
 1. \`get-current-design\` — read the current canvas state (nodes + edges)
-2. \`design-architecture\` — call with the updated spec
-3. \`render-model-builder\` — display the updated design
-4. \`show-next-steps\` — show the action panel again
+2. Re-verify shape integrity for any changed layers
+3. \`design-architecture\` — call with the updated spec
+4. \`render-model-builder\` — display the updated design
+5. \`show-next-steps\` — show the action panel again
 
 ## Step 7 — Generate code
 Call \`generate-pytorch-code\` (graph is optional — omit to use the saved design) to produce runnable PyTorch.
 
+## Step 8 — Training scripts
+Call \`prepare-train\` to open the training setup widget, then \`generate-training-code\` to produce model.py / data.py / train.py.
+Scripts are saved server-side automatically. Use \`get-training-code\` to retrieve them later (e.g. file='train' for just train.py).
+
 ---
 **Summary of the mandatory three-step render sequence:**
 \`design-architecture\` → stage layout → \`render-model-builder\` → show builder → \`show-next-steps\` → action panel
+
+**Shape integrity is your responsibility before calling \`design-architecture\`. The visual system will highlight mismatches but will not auto-fix them — get dimensions right upfront.**
 `)
 );
 
