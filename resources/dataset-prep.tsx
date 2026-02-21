@@ -256,11 +256,23 @@ export default function DatasetPrep() {
 
   const canGenerate = (inputTab === 'curated' ? !!selected : !!customUrl.trim()) && !isGenerating;
 
+  const inputStyle: React.CSSProperties = {
+    width: '100%', padding: '4px 8px', backgroundColor: '#0c0c0c',
+    border: '1px solid #1e1e1e', borderRadius: 4, color: '#c8c8c8',
+    fontSize: 11, outline: 'none', boxSizing: 'border-box', fontFamily: 'monospace',
+  };
+  const selectStyle: React.CSSProperties = {
+    ...inputStyle, cursor: 'pointer', appearance: 'none',
+  };
+  const rowLabel: React.CSSProperties = {
+    fontSize: 9, color: '#3a3a3a', letterSpacing: 0.3, marginBottom: 3,
+  };
+
   if (isPending) {
     return (
       <McpUseProvider autoSize>
-        <div style={{ height: 580, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#0d0d0d', color: '#333', fontFamily: 'monospace', fontSize: 12 }}>
-          Initializing…
+        <div style={{ height: 560, display: 'flex', alignItems: 'center', justifyContent: 'center', backgroundColor: '#0a0a0a', color: '#2a2a2a', fontFamily: 'monospace', fontSize: 11 }}>
+          Loading…
         </div>
       </McpUseProvider>
     );
@@ -269,51 +281,44 @@ export default function DatasetPrep() {
   return (
     <McpUseProvider autoSize>
       <style>{`
-        @keyframes blobGlow {
-          0%, 100% { transform: scale(1); }
-          50%       { transform: scale(1.06); }
-        }
-        @keyframes nodePulse {
-          0%, 100% { opacity: 1; }
-          50%       { opacity: 0.75; }
-        }
-        @keyframes edgeDash {
-          from { stroke-dashoffset: 16; }
-          to   { stroke-dashoffset: 0; }
-        }
+        @keyframes nodePulse { 0%,100%{opacity:1} 50%{opacity:0.7} }
+        @keyframes edgeDash  { from{stroke-dashoffset:12} to{stroke-dashoffset:0} }
+        select option { background:#111; }
       `}</style>
       <div style={{
-        height: 580,
-        display: 'flex',
-        flexDirection: 'column',
-        backgroundColor: '#0d0d0d',
-        color: '#e0e0e0',
+        height: 560, display: 'flex', flexDirection: 'column',
+        backgroundColor: '#0a0a0a', color: '#c8c8c8',
         fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
-        fontSize: 13,
-        overflow: 'hidden',
+        fontSize: 12, overflow: 'hidden',
       }}>
-        {/* ── Header ──────────────────────────────────────────────────────── */}
-        <div style={{ height: 42, borderBottom: '1px solid #141414', display: 'flex', alignItems: 'center', padding: '0 14px', gap: 10, backgroundColor: '#070707', flexShrink: 0 }}>
-          <span style={{ fontSize: 12, fontWeight: 700, color: '#d0d0d0', letterSpacing: 0.3 }}>Prepare Training</span>
-          <div style={{ width: 1, height: 16, backgroundColor: '#1e1e1e' }} />
-          <span style={{ fontSize: 10, color: '#3a3a3a' }}>Select dataset → preview forward pass</span>
+
+        {/* ── Slim header ─────────────────────────────────────────────────── */}
+        <div style={{ height: 36, borderBottom: '1px solid #111', display: 'flex', alignItems: 'center', padding: '0 14px', gap: 8, flexShrink: 0 }}>
+          <span style={{ fontSize: 11, fontWeight: 600, color: '#c8c8c8' }}>Prepare Training</span>
+          <div style={{ width: 1, height: 12, backgroundColor: '#1e1e1e' }} />
+          {taskType && <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 3, backgroundColor: '#0d1b2a', color: '#60a5fa', border: '1px solid #1d4ed850', fontWeight: 600 }}>{taskType}</span>}
+          {hasCustomGraph && <span style={{ fontSize: 9, padding: '1px 6px', borderRadius: 3, backgroundColor: '#0a1a0a', color: '#4ade80', border: '1px solid #16653450', fontWeight: 600 }}>Model · {demoNodes.length} layers</span>}
+          <div style={{ flex: 1 }} />
+          {simRunning
+            ? <button onClick={stopSim} style={{ padding: '3px 10px', background: 'none', border: '1px solid #3d1515', borderRadius: 4, color: '#f87171', cursor: 'pointer', fontSize: 10 }}>■ Stop</button>
+            : <button onClick={startSim} style={{ padding: '3px 10px', background: 'none', border: '1px solid #166534', borderRadius: 4, color: '#4ade80', cursor: 'pointer', fontSize: 10 }}>▶ Run</button>
+          }
         </div>
 
         {/* ── Body ────────────────────────────────────────────────────────── */}
         <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
 
-          {/* LEFT: Dataset picker ─────────────────────────────────────────── */}
-          <div style={{ width: 290, borderRight: '1px solid #141414', display: 'flex', flexDirection: 'column', flexShrink: 0, overflow: 'hidden' }}>
+          {/* LEFT: controls ─────────────────────────────────────────────── */}
+          <div style={{ width: 240, borderRight: '1px solid #111', display: 'flex', flexDirection: 'column', flexShrink: 0, overflow: 'hidden' }}>
 
-            {/* Input mode tabs */}
-            <div style={{ display: 'flex', borderBottom: '1px solid #141414', flexShrink: 0 }}>
+            {/* Mode tabs */}
+            <div style={{ display: 'flex', borderBottom: '1px solid #111', flexShrink: 0 }}>
               {(['curated', 'custom'] as const).map(t => (
                 <button key={t} onClick={() => setInputTab(t)} style={{
-                  flex: 1, padding: '9px 0', background: 'none', border: 'none',
-                  borderBottom: `2px solid ${inputTab === t ? '#3b82f6' : 'transparent'}`,
-                  color: inputTab === t ? '#93c5fd' : '#444',
-                  cursor: 'pointer', fontSize: 11, fontWeight: 600, letterSpacing: 0.3,
-                  textTransform: 'uppercase' as const,
+                  flex: 1, padding: '7px 0', background: 'none', border: 'none',
+                  borderBottom: `2px solid ${inputTab === t ? accentColor : 'transparent'}`,
+                  color: inputTab === t ? accentColor : '#2e2e2e',
+                  cursor: 'pointer', fontSize: 10, fontWeight: 600,
                 }}>
                   {t === 'curated' ? 'Curated' : 'Custom URL'}
                 </button>
@@ -322,289 +327,132 @@ export default function DatasetPrep() {
 
             {inputTab === 'curated' ? (
               <>
-                {/* Category tabs */}
-                <div style={{ display: 'flex', borderBottom: '1px solid #141414', flexShrink: 0 }}>
+                {/* Category tabs — compact pill row */}
+                <div style={{ display: 'flex', gap: 4, padding: '6px 8px', borderBottom: '1px solid #111', flexShrink: 0, flexWrap: 'wrap' as const }}>
                   {CAT_TABS.map(({ key, label }) => (
                     <button key={key} onClick={() => { setCategory(key); setSelected(null); }} style={{
-                      flex: 1, padding: '8px 0', background: 'none', border: 'none',
-                      borderBottom: `2px solid ${category === key ? accentColor : 'transparent'}`,
-                      color: category === key ? accentColor : '#3a3a3a',
-                      cursor: 'pointer', fontSize: 10, fontWeight: 700, letterSpacing: 0.3,
-                    }}>
-                      {label}
-                    </button>
+                      padding: '3px 8px', background: 'none', borderRadius: 3,
+                      border: `1px solid ${category === key ? accentColor : '#1e1e1e'}`,
+                      color: category === key ? accentColor : '#2a2a2a',
+                      cursor: 'pointer', fontSize: 9, fontWeight: 700,
+                    }}>{label}</button>
                   ))}
                 </div>
 
-                {/* Dataset list */}
-                <div style={{ flex: 1, overflowY: 'auto', padding: '8px 8px 0' }}>
+                {/* Dataset list — compact */}
+                <div style={{ flex: 1, overflowY: 'auto', padding: '6px' }}>
                   {DATASETS[category].map(ds => {
                     const isSel = selected?.id === ds.id;
                     return (
                       <div key={ds.id} onClick={() => setSelected(ds)} style={{
-                        padding: '10px 11px', borderRadius: 7, marginBottom: 6, cursor: 'pointer',
-                        border: `1px solid ${isSel ? accentColor : '#191919'}`,
-                        backgroundColor: isSel ? `${accentColor}0d` : '#090909',
-                        transition: 'border-color 0.15s, background-color 0.15s',
+                        padding: '7px 9px', borderRadius: 5, marginBottom: 4, cursor: 'pointer',
+                        border: `1px solid ${isSel ? accentColor : '#141414'}`,
+                        backgroundColor: isSel ? `${accentColor}0c` : 'transparent',
+                        transition: 'border-color 0.12s',
                       }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 3 }}>
-                          <span style={{ fontSize: 11, fontWeight: 700, color: isSel ? accentColor : '#b0b0b0' }}>{ds.name}</span>
-                          <span style={{ fontSize: 9, padding: '1px 5px', borderRadius: 3, backgroundColor: '#0f1f10', color: '#4ade80', border: '1px solid #166534', fontWeight: 600 }}>{ds.task}</span>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 2 }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: isSel ? accentColor : '#909090' }}>{ds.name}</span>
+                          <span style={{ fontSize: 8, padding: '1px 4px', borderRadius: 2, backgroundColor: '#0a1a0a', color: '#4ade80', fontWeight: 700 }}>{ds.task}</span>
+                          <span style={{ fontSize: 8, color: '#252525', marginLeft: 'auto' as const }}>{ds.size}</span>
                         </div>
-                        <div style={{ fontSize: 10, color: '#484848', marginBottom: 4, lineHeight: 1.4 }}>{ds.description}</div>
-                        <div style={{ display: 'flex', gap: 8 }}>
-                          <span style={{ fontSize: 9, color: '#e07020', fontFamily: 'monospace' }}>{ds.hfId}</span>
-                          <span style={{ fontSize: 9, color: '#282828' }}>{ds.size}</span>
-                        </div>
+                        <div style={{ fontSize: 9, color: '#2e2e2e', lineHeight: 1.3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' as const }}>{ds.description}</div>
+                        <div style={{ fontSize: 8, color: '#3a2010', fontFamily: 'monospace', marginTop: 2 }}>{ds.hfId}</div>
                       </div>
                     );
                   })}
                 </div>
 
-                {/* HF token — shown for any HuggingFace dataset */}
                 {selected && (
-                  <div style={{ padding: '10px 12px', borderTop: '1px solid #141414', flexShrink: 0 }}>
-                    <div style={{ fontSize: 10, color: '#484848', marginBottom: 5, display: 'flex', alignItems: 'center', gap: 5 }}>
-                      <span style={{ color: '#e07020' }}>⬡</span>
-                      HuggingFace Token
-                      <span style={{ color: '#282828' }}>(optional for public datasets)</span>
-                    </div>
-                    <input
-                      type="password"
-                      value={hfToken}
-                      onChange={e => setHfToken(e.target.value)}
-                      placeholder="hf_…"
-                      style={{ width: '100%', padding: '6px 10px', backgroundColor: '#111', border: '1px solid #222', borderRadius: 5, color: '#e0e0e0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, fontFamily: 'monospace' }}
-                    />
+                  <div style={{ padding: '6px 8px', borderTop: '1px solid #111', flexShrink: 0 }}>
+                    <div style={rowLabel}>HuggingFace Token (optional)</div>
+                    <input type="password" value={hfToken} onChange={e => setHfToken(e.target.value)} placeholder="hf_…" style={inputStyle} />
                   </div>
                 )}
               </>
             ) : (
-              /* Custom URL panel */
-              <div style={{ flex: 1, padding: '14px 12px', display: 'flex', flexDirection: 'column', gap: 12, overflowY: 'auto' }}>
+              <div style={{ flex: 1, padding: '10px 8px', display: 'flex', flexDirection: 'column', gap: 8, overflowY: 'auto' }}>
                 <div>
-                  <div style={{ fontSize: 10, color: '#484848', marginBottom: 6 }}>Dataset URL</div>
-                  <input
-                    type="text"
-                    value={customUrl}
-                    onChange={e => setCustomUrl(e.target.value)}
-                    placeholder="https://huggingface.co/datasets/…  or  kaggle.com/datasets/…"
-                    style={{
-                      width: '100%', padding: '7px 10px', backgroundColor: '#111',
-                      border: `1px solid ${platform ? accentColor : '#222'}`,
-                      borderRadius: 5, color: '#e0e0e0', fontSize: 11, outline: 'none',
-                      boxSizing: 'border-box' as const, fontFamily: 'monospace',
-                      transition: 'border-color 0.2s',
-                    }}
-                  />
+                  <div style={rowLabel}>Dataset URL</div>
+                  <input type="text" value={customUrl} onChange={e => setCustomUrl(e.target.value)}
+                    placeholder="huggingface.co/datasets/… or kaggle.com/datasets/…"
+                    style={{ ...inputStyle, border: `1px solid ${platform ? accentColor : '#1e1e1e'}` }} />
                 </div>
-
-                {/* Platform badge */}
-                {platform && (
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                    <span style={{
-                      fontSize: 10, padding: '3px 9px', borderRadius: 4, fontWeight: 700, letterSpacing: 0.3,
-                      backgroundColor: platform === 'huggingface' ? '#0f1928' : '#12100a',
-                      color:           platform === 'huggingface' ? '#60a5fa' : '#fbbf24',
-                      border: `1px solid ${platform === 'huggingface' ? '#1d4ed8' : '#92400e'}`,
-                    }}>
-                      {platform === 'huggingface' ? '⬡ HuggingFace' : '◆ Kaggle'}
-                    </span>
-                    <span style={{ fontSize: 9, color: '#333' }}>detected</span>
-                  </div>
-                )}
-
-                {platform === 'huggingface' && (
-                  <div>
-                    <div style={{ fontSize: 10, color: '#484848', marginBottom: 6 }}>HuggingFace Token</div>
-                    <input
-                      type="password" value={hfToken} onChange={e => setHfToken(e.target.value)}
-                      placeholder="hf_…"
-                      style={{ width: '100%', padding: '6px 10px', backgroundColor: '#111', border: '1px solid #1d4ed8', borderRadius: 5, color: '#e0e0e0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, fontFamily: 'monospace' }}
-                    />
-                  </div>
-                )}
-
-                {platform === 'kaggle' && (
-                  <div>
-                    <div style={{ fontSize: 10, color: '#484848', marginBottom: 6 }}>Kaggle API Key</div>
-                    <input
-                      type="password" value={kaggleKey} onChange={e => setKaggleKey(e.target.value)}
-                      placeholder="your_kaggle_api_key"
-                      style={{ width: '100%', padding: '6px 10px', backgroundColor: '#111', border: '1px solid #92400e', borderRadius: 5, color: '#e0e0e0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, fontFamily: 'monospace' }}
-                    />
-                  </div>
-                )}
-
-                <div style={{ fontSize: 10, color: '#282828', lineHeight: 1.6 }}>
-                  Supported: HuggingFace and Kaggle datasets.<br />
-                  Platform is auto-detected from the URL.<br />
-                  API keys are used only for private datasets.
-                </div>
+                {platform && <span style={{ fontSize: 9, color: platform === 'huggingface' ? '#60a5fa' : '#fbbf24', fontWeight: 600 }}>
+                  {platform === 'huggingface' ? '⬡ HuggingFace detected' : '◆ Kaggle detected'}
+                </span>}
+                {platform === 'huggingface' && <div><div style={rowLabel}>HF Token</div><input type="password" value={hfToken} onChange={e => setHfToken(e.target.value)} placeholder="hf_…" style={inputStyle} /></div>}
+                {platform === 'kaggle' && <div><div style={rowLabel}>Kaggle API Key</div><input type="password" value={kaggleKey} onChange={e => setKaggleKey(e.target.value)} placeholder="kaggle_key" style={inputStyle} /></div>}
               </div>
             )}
 
-            {/* Training config — Loss + Optimizer */}
-            <div style={{ padding: '10px 12px 8px', borderTop: '1px solid #141414', flexShrink: 0 }}>
-              <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase' as const, fontWeight: 700, marginBottom: 8 }}>
-                Training Config
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-                {/* Loss selector */}
-                <div>
-                  <div style={{ fontSize: 9, color: '#484848', marginBottom: 3 }}>Loss Function</div>
-                  <select
-                    value={loss}
-                    onChange={e => setLoss(e.target.value)}
-                    style={{ width: '100%', padding: '5px 7px', backgroundColor: '#111', border: '1px solid #222', borderRadius: 4, color: '#d0d0d0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, cursor: 'pointer', appearance: 'none' as const }}
-                  >
-                    {['CrossEntropyLoss','BCEWithLogitsLoss','MSELoss','L1Loss','HuberLoss','NLLLoss','KLDivLoss','CTCLoss'].map(l => (
-                      <option key={l} value={l}>{l}</option>
-                    ))}
+            {/* Training config + hyperparams — compact grid */}
+            <div style={{ padding: '8px', borderTop: '1px solid #111', flexShrink: 0 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5, marginBottom: 5 }}>
+                <div><div style={rowLabel}>Loss</div>
+                  <select value={loss} onChange={e => setLoss(e.target.value)} style={selectStyle}>
+                    {['CrossEntropyLoss','BCEWithLogitsLoss','MSELoss','L1Loss','HuberLoss','NLLLoss','KLDivLoss','CTCLoss'].map(l => <option key={l} value={l}>{l}</option>)}
                   </select>
                 </div>
-                {/* Optimizer selector */}
-                <div>
-                  <div style={{ fontSize: 9, color: '#484848', marginBottom: 3 }}>Optimizer</div>
-                  <select
-                    value={optimizer}
-                    onChange={e => setOptimizer(e.target.value)}
-                    style={{ width: '100%', padding: '5px 7px', backgroundColor: '#111', border: '1px solid #222', borderRadius: 4, color: '#d0d0d0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, cursor: 'pointer', appearance: 'none' as const }}
-                  >
-                    {['Adam','AdamW','SGD','RMSprop','Adadelta','Adagrad','LBFGS'].map(o => (
-                      <option key={o} value={o}>{o}</option>
-                    ))}
+                <div><div style={rowLabel}>Optimizer</div>
+                  <select value={optimizer} onChange={e => setOptimizer(e.target.value)} style={selectStyle}>
+                    {['Adam','AdamW','SGD','RMSprop','Adadelta','Adagrad','LBFGS'].map(o => <option key={o} value={o}>{o}</option>)}
                   </select>
                 </div>
+                <div><div style={rowLabel}>Learning Rate</div><input type="text" value={lr} onChange={e => setLr(e.target.value)} style={inputStyle} /></div>
+                <div><div style={rowLabel}>Batch Size</div><input type="text" value={batchSz} onChange={e => setBatchSz(e.target.value)} style={inputStyle} /></div>
               </div>
-            </div>
-
-            {/* Hyperparameters */}
-            <div style={{ padding: '6px 12px 6px', flexShrink: 0 }}>
-              <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase' as const, fontWeight: 700, marginBottom: 8 }}>
-                Hyperparameters
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginBottom: 6 }}>
-                {([
-                  { label: 'Learning Rate', value: lr, set: setLr },
-                  { label: 'Batch Size', value: batchSz, set: setBatchSz },
-                ] as const).map(({ label, value, set }) => (
-                  <div key={label}>
-                    <div style={{ fontSize: 9, color: '#484848', marginBottom: 3 }}>{label}</div>
-                    <input
-                      type="text" value={value} onChange={e => set(e.target.value)}
-                      style={{ width: '100%', padding: '5px 7px', backgroundColor: '#111', border: '1px solid #222', borderRadius: 4, color: '#d0d0d0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, fontFamily: 'monospace' }}
-                    />
-                  </div>
-                ))}
-              </div>
-              <div>
-                <div style={{ fontSize: 9, color: '#484848', marginBottom: 3 }}>Epochs</div>
-                <input
-                  type="text" value={epochs} onChange={e => setEpochs(e.target.value)}
-                  style={{ width: '100%', padding: '5px 7px', backgroundColor: '#111', border: '1px solid #222', borderRadius: 4, color: '#d0d0d0', fontSize: 11, outline: 'none', boxSizing: 'border-box' as const, fontFamily: 'monospace' }}
-                />
-              </div>
-            </div>
-
-            {/* Generate button */}
-            <div style={{ padding: '8px 12px 10px', flexShrink: 0 }}>
-              <button
-                disabled={!canGenerate}
-                onClick={handleGenerate}
-                style={{
-                  width: '100%', padding: '9px 0',
-                  backgroundColor: isGenerating ? '#0d0d0d' : canGenerate ? '#0a1a2a' : '#0d0d0d',
-                  border: `1px solid ${isGenerating ? '#1d4ed8' : canGenerate ? '#3b82f6' : '#1a1a1a'}`,
-                  borderRadius: 6,
-                  color: isGenerating ? '#60a5fa' : canGenerate ? '#93c5fd' : '#2a2a2a',
-                  cursor: canGenerate ? 'pointer' : 'not-allowed',
-                  fontSize: 11, fontWeight: 700, letterSpacing: 0.4,
-                  transition: 'all 0.15s',
-                }}
-              >
-                {isGenerating ? '⟳ Generating…' : '⚡ Generate Training Scripts'}
+              <div style={{ marginBottom: 6 }}><div style={rowLabel}>Epochs</div><input type="text" value={epochs} onChange={e => setEpochs(e.target.value)} style={inputStyle} /></div>
+              <button disabled={!canGenerate} onClick={handleGenerate} style={{
+                width: '100%', padding: '7px 0',
+                backgroundColor: canGenerate ? `${accentColor}14` : 'transparent',
+                border: `1px solid ${canGenerate ? accentColor : '#1a1a1a'}`,
+                borderRadius: 4, color: canGenerate ? accentColor : '#252525',
+                cursor: canGenerate ? 'pointer' : 'not-allowed', fontSize: 10, fontWeight: 700,
+                transition: 'all 0.12s',
+              }}>
+                {isGenerating ? '⟳ Generating…' : '⚡ Generate Scripts'}
               </button>
             </div>
           </div>
 
-          {/* RIGHT: Model simulation + code output ───────────────────────── */}
+          {/* RIGHT: node tree + code panel ──────────────────────────────── */}
           <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-            {/* Sim controls */}
-            <div style={{ height: 38, borderBottom: '1px solid #141414', display: 'flex', alignItems: 'center', padding: '0 14px', gap: 8, backgroundColor: '#080808', flexShrink: 0 }}>
-              <span style={{ fontSize: 11, fontWeight: 700, color: '#3a3a3a', letterSpacing: 0.5 }}>MODEL SIMULATION</span>
-              {hasCustomGraph ? (
-                <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 3, backgroundColor: '#0a1a0a', color: '#4ade80', border: '1px solid #166534', fontWeight: 700, letterSpacing: 0.3 }}>
-                  YOUR MODEL · {demoNodes.length} layers
-                </span>
-              ) : (
-                <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 3, backgroundColor: '#111', color: '#444', border: '1px solid #222', fontWeight: 600 }}>
-                  demo
-                </span>
-              )}
-              {taskType && (
-                <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 3, backgroundColor: '#0a1628', color: '#60a5fa', border: '1px solid #1d4ed8', fontWeight: 700, letterSpacing: 0.3 }}>
-                  {taskType}
-                </span>
-              )}
-              {sugLoss && sugLoss !== 'CrossEntropyLoss' || sugOptimizer && sugOptimizer !== 'Adam' ? (
-                <span style={{ fontSize: 9, color: '#333' }}>
-                  {sugLoss} · {sugOptimizer}
-                </span>
-              ) : null}
-              <div style={{ flex: 1 }} />
-              {simRunning ? (
-                <button onClick={stopSim} style={{ padding: '4px 12px', backgroundColor: '#1a0a0a', border: '1px solid #7f1d1d', borderRadius: 4, color: '#f87171', cursor: 'pointer', fontSize: 10, fontWeight: 700 }}>
-                  ■ Stop
-                </button>
-              ) : (
-                <button onClick={startSim} style={{ padding: '4px 12px', backgroundColor: '#0a1a0a', border: '1px solid #166534', borderRadius: 4, color: '#4ade80', cursor: 'pointer', fontSize: 10, fontWeight: 700 }}>
-                  ▶ Run Dummy Pass
-                </button>
-              )}
-            </div>
 
-            {/* Simulation canvas */}
-            <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', overflowY: 'auto', padding: '16px 24px', minHeight: 0 }}>
+            {/* Node tree scroll area */}
+            <div style={{ flex: 1, overflowY: 'auto', padding: '20px 28px', minHeight: 0 }}>
               <SimulationView
                 nodes={demoNodes}
                 animStep={animStep}
                 simRunning={simRunning}
                 category={category}
-                shapeAnnotations={!isPending ? (props.shapeAnnotations ?? {}) : {}}
+                shapeAnnotations={props.shapeAnnotations ?? {}}
               />
             </div>
 
-            {/* Code output panel — shown after generation */}
+            {/* Code panel */}
             {files && (
-              <div style={{ height: 210, borderTop: '1px solid #141414', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
-                {/* Tabs + copy */}
-                <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #141414', backgroundColor: '#080808', flexShrink: 0 }}>
+              <div style={{ height: 200, borderTop: '1px solid #111', display: 'flex', flexDirection: 'column', flexShrink: 0 }}>
+                <div style={{ display: 'flex', alignItems: 'center', borderBottom: '1px solid #111', flexShrink: 0 }}>
                   {(['model', 'data', 'train'] as const).map(tab => (
                     <button key={tab} onClick={() => setCodeTab(tab)} style={{
-                      padding: '7px 14px', background: 'none', border: 'none',
+                      padding: '6px 12px', background: 'none', border: 'none',
                       borderBottom: `2px solid ${codeTab === tab ? '#3b82f6' : 'transparent'}`,
-                      color: codeTab === tab ? '#93c5fd' : '#444',
-                      cursor: 'pointer', fontSize: 10, fontWeight: 700, letterSpacing: 0.3,
+                      color: codeTab === tab ? '#93c5fd' : '#333',
+                      cursor: 'pointer', fontSize: 10, fontWeight: 600,
                     }}>
                       {tab === 'model' ? 'model.py' : tab === 'data' ? 'data.py' : 'train.py'}
                     </button>
                   ))}
                   <div style={{ flex: 1 }} />
                   <button onClick={copyCode} style={{
-                    padding: '4px 12px', margin: '0 8px',
-                    backgroundColor: copied ? '#0a1a0a' : '#111',
-                    border: `1px solid ${copied ? '#166534' : '#222'}`,
-                    borderRadius: 4, color: copied ? '#4ade80' : '#555',
-                    cursor: 'pointer', fontSize: 9, fontWeight: 700,
-                    transition: 'all 0.2s',
-                  }}>
-                    {copied ? '✓ Copied' : 'Copy'}
-                  </button>
+                    padding: '3px 10px', margin: '0 8px', background: 'none',
+                    border: `1px solid ${copied ? '#166534' : '#1e1e1e'}`,
+                    borderRadius: 3, color: copied ? '#4ade80' : '#333',
+                    cursor: 'pointer', fontSize: 9, fontWeight: 600, transition: 'all 0.15s',
+                  }}>{copied ? '✓ Copied' : 'Copy'}</button>
                 </div>
-                {/* Code scroll */}
-                <div style={{ flex: 1, overflowY: 'auto', padding: '10px 14px', backgroundColor: '#060606' }}>
-                  <pre style={{ margin: 0, fontSize: 10, color: '#9ca3af', fontFamily: 'monospace', lineHeight: 1.6, whiteSpace: 'pre-wrap' as const, wordBreak: 'break-word' as const }}>
+                <div style={{ flex: 1, overflowY: 'auto', padding: '8px 14px', backgroundColor: '#060606' }}>
+                  <pre style={{ margin: 0, fontSize: 10, color: '#6b7280', fontFamily: 'monospace', lineHeight: 1.55, whiteSpace: 'pre-wrap' as const, wordBreak: 'break-word' as const }}>
                     {codeTab === 'model' ? files.modelPy : codeTab === 'data' ? files.dataPy : files.trainPy}
                   </pre>
                 </div>
@@ -617,7 +465,10 @@ export default function DatasetPrep() {
   );
 }
 
-// ── Simulation view ───────────────────────────────────────────────────────────
+// ── Simulation view — clean vertical node stack ───────────────────────────────
+
+const CONN_H = 16; // px of connector between nodes
+const N_H    = 34; // node row height
 
 function SimulationView({
   nodes, animStep, simRunning, category, shapeAnnotations,
@@ -628,224 +479,108 @@ function SimulationView({
   category: CatKey;
   shapeAnnotations: Record<string, string>;
 }) {
-  const accent    = ACCENT[category];
-  const totalH    = nodes.length * NODE_H + (nodes.length - 1) * EDGE_H;
-  const NODE_W    = 172;
-  // SVG dimensions for edges
-  const svgW      = NODE_W;
-  const edgeCx    = NODE_W / 2;
+  const accent = ACCENT[category];
 
   return (
-    <div style={{ display: 'flex', gap: 36, alignItems: 'flex-start' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'stretch', width: '100%', maxWidth: 420, margin: '0 auto' }}>
 
-      {/* Dataset blob */}
-      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8, paddingTop: NODE_H / 2 - 34 }}>
-        <div style={{
-          width: 68, height: 68, borderRadius: '50%',
-          backgroundColor: `${accent}0f`,
-          border: `2px solid ${simRunning ? accent : '#1e1e1e'}`,
-          display: 'flex', alignItems: 'center', justifyContent: 'center',
-          boxShadow: simRunning ? `0 0 20px ${accent}44, 0 0 40px ${accent}1a` : 'none',
-          transition: 'border-color 0.4s, box-shadow 0.4s',
-          animation: simRunning ? 'blobGlow 1.8s ease-in-out infinite' : 'none',
-          flexShrink: 0,
-        }}>
-          <div style={{
-            width: 38, height: 38, borderRadius: '50%',
-            backgroundColor: simRunning ? `${accent}1a` : '#0d0d0d',
-            border: `1px solid ${simRunning ? accent : '#1a1a1a'}`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-            fontSize: 18, transition: 'background-color 0.4s, border-color 0.4s',
-          }}>
-            {BLOB_ICON[category]}
-          </div>
-        </div>
-
-        <span style={{
-          fontSize: 10, fontWeight: 700, letterSpacing: 0.3,
-          color: simRunning ? accent : '#333',
-          transition: 'color 0.4s', textAlign: 'center' as const, maxWidth: 72,
-        }}>
+      {/* Dataset source pill */}
+      <div style={{
+        display: 'flex', alignItems: 'center', gap: 6, marginBottom: 10,
+        padding: '5px 10px', borderRadius: 6,
+        backgroundColor: simRunning ? `${accent}10` : 'transparent',
+        border: `1px solid ${simRunning ? `${accent}40` : '#141414'}`,
+        transition: 'all 0.3s',
+      }}>
+        <span style={{ fontSize: 14 }}>{BLOB_ICON[category]}</span>
+        <span style={{ fontSize: 10, fontWeight: 600, color: simRunning ? accent : '#2a2a2a', transition: 'color 0.3s' }}>
           {BLOB_LABEL[category]}
         </span>
-
         {simRunning && animStep >= 0 && (
-          <span style={{ fontSize: 9, color: '#333', fontFamily: 'monospace' }}>
-            step {animStep + 1}/{nodes.length}
+          <span style={{ fontSize: 9, color: '#2a2a2a', marginLeft: 'auto' as const, fontFamily: 'monospace' }}>
+            {animStep + 1} / {nodes.length}
           </span>
         )}
       </div>
 
-      {/* Connector: blob → first node */}
-      <div style={{
-        paddingTop: NODE_H / 2 - 1,
-        display: 'flex', alignItems: 'center', flexShrink: 0,
-      }}>
-        <div style={{
-          width: 28, height: 2,
-          backgroundColor: simRunning && animStep >= 0 ? accent : '#1e1e1e',
-          boxShadow: simRunning && animStep >= 0 ? `0 0 6px ${accent}` : 'none',
-          transition: 'background-color 0.3s, box-shadow 0.3s',
-        }} />
-        <div style={{
-          width: 0, height: 0,
-          borderTop: '5px solid transparent',
-          borderBottom: '5px solid transparent',
-          borderLeft: `7px solid ${simRunning && animStep >= 0 ? accent : '#1e1e1e'}`,
-          marginTop: -1,
-          transition: 'border-left-color 0.3s',
-        }} />
-      </div>
+      {/* Nodes */}
+      {nodes.map((node, idx) => {
+        const nodeColor = NODE_COLORS[node.cat] ?? '#2563eb';
+        const isActive  = simRunning && animStep === idx;
+        const isPast    = simRunning && animStep > idx;
+        const shape     = shapeAnnotations[node.id];
 
-      {/* Model nodes + SVG edges */}
-      <div style={{ position: 'relative', width: NODE_W, height: totalH, flexShrink: 0 }}>
+        return (
+          <div key={node.id}>
+            {/* Connector above (skip first) */}
+            {idx > 0 && (
+              <div style={{ display: 'flex', justifyContent: 'center', height: CONN_H, alignItems: 'center' }}>
+                <div style={{
+                  width: 1, height: '100%',
+                  backgroundColor: isPast ? `${nodeColor}50` : isActive ? nodeColor : '#181818',
+                  boxShadow: isActive ? `0 0 4px ${nodeColor}` : 'none',
+                  transition: 'background-color 0.2s',
+                  animation: isActive ? 'edgeDash 0.4s linear infinite' : 'none',
+                }} />
+              </div>
+            )}
 
-        {/* SVG layer: animated edges */}
-        <svg
-          width={svgW}
-          height={totalH}
-          style={{ position: 'absolute', top: 0, left: 0, pointerEvents: 'none' }}
-        >
-          {nodes.map((node, idx) => {
-            if (idx === 0) return null;
-            const y1 = (idx - 1) * (NODE_H + EDGE_H) + NODE_H;
-            const y2 = idx * (NODE_H + EDGE_H);
-            const nodeColor = NODE_COLORS[node.cat] ?? '#2563eb';
-            const prevColor = NODE_COLORS[nodes[idx - 1].cat] ?? '#2563eb';
-            const isActive  = simRunning && animStep === idx;
-            const isPast    = simRunning && animStep > idx;
-
-            return (
-              <g key={node.id}>
-                {/* Background line */}
-                <line
-                  x1={edgeCx} y1={y1}
-                  x2={edgeCx} y2={y2}
-                  stroke={isPast ? `${nodeColor}44` : '#1c1c1c'}
-                  strokeWidth={2}
-                />
-                {/* Animated flow line */}
-                {isActive && (
-                  <line
-                    x1={edgeCx} y1={y1}
-                    x2={edgeCx} y2={y2}
-                    stroke={`url(#grad-${idx})`}
-                    strokeWidth={2}
-                    strokeDasharray="4 4"
-                    style={{ animation: 'edgeDash 0.35s linear infinite' }}
-                  />
-                )}
-                {/* Gradient def for active edge */}
-                {isActive && (
-                  <defs>
-                    <linearGradient id={`grad-${idx}`} x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%" stopColor={prevColor} />
-                      <stop offset="100%" stopColor={nodeColor} />
-                    </linearGradient>
-                  </defs>
-                )}
-                {/* Glow overlay for active */}
-                {isActive && (
-                  <line
-                    x1={edgeCx} y1={y1}
-                    x2={edgeCx} y2={y2}
-                    stroke={nodeColor}
-                    strokeWidth={4}
-                    strokeOpacity={0.2}
-                  />
-                )}
-              </g>
-            );
-          })}
-        </svg>
-
-        {/* Nodes */}
-        {nodes.map((node, idx) => {
-          const top       = idx * (NODE_H + EDGE_H);
-          const nodeColor = NODE_COLORS[node.cat] ?? '#2563eb';
-          const isActive  = simRunning && animStep === idx;
-          const isPast    = simRunning && animStep > idx;
-
-          return (
-            <div
-              key={node.id}
-              style={{
-                position: 'absolute', top, left: 0,
-                width: NODE_W, height: NODE_H,
-                backgroundColor: isActive ? `${nodeColor}18` : isPast ? `${nodeColor}08` : '#0a0a0a',
-                border: `1px solid ${isActive ? nodeColor : isPast ? `${nodeColor}44` : '#181818'}`,
-                borderRadius: 8,
-                display: 'flex', alignItems: 'center', gap: 10, padding: '0 12px',
-                boxSizing: 'border-box' as const,
-                boxShadow: isActive ? `0 0 14px ${nodeColor}44, 0 0 28px ${nodeColor}18` : 'none',
-                transition: 'background-color 0.22s, border-color 0.22s, box-shadow 0.22s',
-                animation: isActive ? 'nodePulse 0.9s ease-in-out infinite' : 'none',
-              }}
-            >
-              {/* Status dot */}
+            {/* Node row */}
+            <div style={{
+              height: N_H,
+              display: 'flex', alignItems: 'center', gap: 10,
+              padding: '0 12px',
+              borderRadius: 6,
+              border: `1px solid ${isActive ? nodeColor : isPast ? `${nodeColor}30` : '#141414'}`,
+              backgroundColor: isActive ? `${nodeColor}12` : isPast ? `${nodeColor}06` : '#0c0c0c',
+              boxShadow: isActive ? `0 0 12px ${nodeColor}30` : 'none',
+              transition: 'border-color 0.2s, background-color 0.2s, box-shadow 0.2s',
+              animation: isActive ? 'nodePulse 0.9s ease-in-out infinite' : 'none',
+            }}>
+              {/* Color dot */}
               <div style={{
-                width: 8, height: 8, borderRadius: '50%', flexShrink: 0,
-                backgroundColor: isActive ? nodeColor : isPast ? `${nodeColor}55` : '#1c1c1c',
-                boxShadow: isActive ? `0 0 6px ${nodeColor}` : 'none',
-                transition: 'background-color 0.22s, box-shadow 0.22s',
+                width: 6, height: 6, borderRadius: '50%', flexShrink: 0,
+                backgroundColor: isActive ? nodeColor : isPast ? `${nodeColor}60` : '#1e1e1e',
+                boxShadow: isActive ? `0 0 5px ${nodeColor}` : 'none',
+                transition: 'background-color 0.2s',
               }} />
 
-              {/* Label + shape */}
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <span style={{
-                  fontSize: 11,
-                  fontWeight: isActive ? 700 : 400,
-                  color: isActive ? '#ffffff' : isPast ? `${nodeColor}99` : '#3a3a3a',
-                  transition: 'color 0.22s',
-                  display: 'block',
-                }}>
-                  {node.label}
-                </span>
-                {shapeAnnotations[node.id] && (
-                  <span style={{
-                    fontSize: 8, fontFamily: 'monospace',
-                    color: isActive ? `${nodeColor}cc` : '#2a2a2a',
-                    transition: 'color 0.22s',
-                    letterSpacing: 0.2,
-                  }}>
-                    {shapeAnnotations[node.id]}
-                  </span>
-                )}
-              </div>
+              {/* Label */}
+              <span style={{
+                fontSize: 11, fontWeight: isActive ? 600 : 400, flex: 1,
+                color: isActive ? '#e8e8e8' : isPast ? `${nodeColor}80` : '#383838',
+                transition: 'color 0.2s',
+              }}>{node.label}</span>
 
-              {/* Activity indicator */}
-              {isActive && (
+              {/* Shape annotation */}
+              {shape && (
                 <span style={{
-                  fontSize: 8, color: nodeColor, fontWeight: 700, letterSpacing: 2,
-                  animation: 'nodePulse 0.55s ease-in-out infinite',
-                  flexShrink: 0,
-                }}>
-                  ●●●
-                </span>
+                  fontSize: 9, fontFamily: 'monospace',
+                  color: isActive ? `${nodeColor}bb` : '#1e1e1e',
+                  transition: 'color 0.2s',
+                }}>{shape}</span>
+              )}
+
+              {/* Active pulse dots */}
+              {isActive && (
+                <span style={{ fontSize: 7, color: nodeColor, letterSpacing: 2, animation: 'nodePulse 0.5s ease-in-out infinite' }}>●●●</span>
               )}
             </div>
-          );
-        })}
-      </div>
+          </div>
+        );
+      })}
 
-      {/* Output: loss indicator after last node */}
+      {/* Loss output pill */}
       <div style={{
-        paddingTop: totalH - NODE_H / 2 - 8,
-        display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0,
+        display: 'flex', justifyContent: 'center', marginTop: 10,
         opacity: simRunning && animStep === nodes.length - 1 ? 1 : 0,
         transition: 'opacity 0.3s',
       }}>
-        <div style={{ width: 0, height: 0, borderTop: '5px solid transparent', borderBottom: '5px solid transparent', borderLeft: `7px solid ${accent}`, marginRight: 4 }} />
         <div style={{
-          padding: '5px 11px',
-          backgroundColor: `${accent}11`,
-          border: `1px solid ${accent}`,
-          borderRadius: 6,
-          fontSize: 10, color: accent, fontWeight: 700, letterSpacing: 0.3,
-          boxShadow: `0 0 10px ${accent}33`,
-        }}>
-          Loss ✓
-        </div>
+          padding: '4px 14px', borderRadius: 5,
+          backgroundColor: `${accent}12`, border: `1px solid ${accent}50`,
+          fontSize: 9, color: accent, fontWeight: 700, letterSpacing: 0.5,
+        }}>Loss ✓</div>
       </div>
     </div>
   );
