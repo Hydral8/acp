@@ -1,9 +1,9 @@
-"""data.py — HuggingFace dataset loader for MiniPile"""
+"""data.py — HuggingFace dataset loader for TinyStories"""
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 import torchvision.transforms as T
 
-DATASET_ID  = "JeanKaddour/minipile"
+DATASET_ID  = "roneneldan/TinyStories"
 BATCH_SIZE  = 32
 MAX_LENGTH  = 512   # tokens
 

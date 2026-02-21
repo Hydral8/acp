@@ -1,7 +1,7 @@
 {
-  "dataset": "MiniPile",
+  "dataset": "TinyStories",
   "optimizer": "Adam",
   "loss": "CrossEntropyLoss",
   "taskType": "unknown",
-  "generatedAt": "2026-02-21T23:39:41.104Z"
+  "generatedAt": "2026-02-21T23:48:30.659Z"
 }
