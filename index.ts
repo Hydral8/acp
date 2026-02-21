@@ -38,6 +38,7 @@ const nodeSchema = z.object({
   type: z.string(),
   parameters: z.record(z.string(), z.unknown()),
   composite: compositeSchema,
+  codeOverride: z.string().optional(),
 });
 
 const edgeSchema = z.object({
@@ -379,6 +380,16 @@ function emitNode(
   forwardLines: string[],
   li: number,
 ): void {
+  // ── Code override: user-supplied forward line takes precedence ──────────────
+  if (node.codeOverride) {
+    const line = node.codeOverride.trim()
+      .replace(/\{in\}/g,  inVar)
+      .replace(/\{out\}/g, outVar);
+    forwardLines.push(`# ${node.type} (custom override)`);
+    forwardLines.push(line);
+    return;
+  }
+
   const q = node.parameters;
   switch (node.type) {
     case "Input":
@@ -1038,6 +1049,99 @@ server.tool(
       return object({ graph: null, message: "No design saved yet — open the builder first and add some blocks." });
     }
     return object({ graph: savedDesign, message: `Current design has ${savedDesign.nodes.length} nodes and ${savedDesign.edges.length} edges.` });
+  }
+);
+
+// ── Tool: set-block-code ───────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "set-block-code",
+    description:
+      "Set a custom Python forward-pass line for a specific block in the current design. " +
+      "Use {in} for the input tensor variable and {out} for the output. " +
+      "Example: '{out} = torch.sigmoid(self.fc({in})) + {in}'. " +
+      "Call rerender-builder afterward to show the updated visualization.",
+    schema: z.object({
+      nodeId: z.string().describe("ID of the node to update (from get-current-design)"),
+      code: z.string().optional().describe(
+        "Python forward-pass line. Use {in} for input var, {out} for output var. " +
+        "Omit to remove the override and restore auto-generated code."
+      ),
+    }),
+    outputSchema: z.object({ updated: z.boolean(), nodeId: z.string(), message: z.string() }),
+  },
+  async ({ nodeId, code }) => {
+    if (!savedDesign) {
+      return object({ updated: false, nodeId, message: "No saved design — open the builder first." });
+    }
+    const node = savedDesign.nodes.find(n => n.id === nodeId);
+    if (!node) {
+      return object({ updated: false, nodeId, message: `Node '${nodeId}' not found in saved design.` });
+    }
+    savedDesign = {
+      ...savedDesign,
+      nodes: savedDesign.nodes.map(n =>
+        n.id === nodeId ? { ...n, codeOverride: code } : n
+      ),
+    };
+    return object({
+      updated: true,
+      nodeId,
+      message: code
+        ? `Code override set on '${node.type}' (${nodeId}). Call rerender-builder to refresh the view.`
+        : `Code override cleared on '${node.type}' (${nodeId}). Auto-generated code restored.`,
+    });
+  }
+);
+
+// ── Tool: rerender-builder ─────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "rerender-builder",
+    description:
+      "Re-render the visual architecture builder with the current saved design. " +
+      "Call this after set-block-code or any other programmatic changes to refresh the visualization.",
+    schema: z.object({}),
+    widget: {
+      name: "ml-architecture-builder",
+      invoking: "Refreshing architecture…",
+      invoked: "Architecture refreshed",
+    },
+  },
+  async () => {
+    if (!savedDesign || savedDesign.nodes.length === 0) {
+      return widget({
+        props: {},
+        output: text("No saved design found — use render-model-builder to open the builder first."),
+      });
+    }
+
+    // Re-layout from saved spec (re-compute positions)
+    const specNodes = savedDesign.nodes.map(n => ({
+      id: n.id, type: n.type, parameters: n.parameters,
+    }));
+    const specEdges = savedDesign.edges.map(e => ({
+      from: e.sourceId, to: e.targetId,
+    }));
+    const layout = autoLayout(specNodes, specEdges);
+
+    // Carry forward codeOverride from savedDesign
+    const nodes = layout.nodes.map(ln => {
+      const saved = savedDesign!.nodes.find(sn => sn.id === ln.id);
+      return saved?.codeOverride ? { ...ln, codeOverride: saved.codeOverride } : ln;
+    });
+
+    const overrideCount = nodes.filter(n => (n as typeof n & { codeOverride?: string }).codeOverride).length;
+
+    return widget({
+      props: { initialNodes: nodes, initialEdges: layout.edges },
+      output: text(
+        `Architecture refreshed — ${nodes.length} layer${nodes.length !== 1 ? 's' : ''}` +
+        (overrideCount > 0 ? `, ${overrideCount} with custom code overrides` : '') + '.'
+      ),
+    });
   }
 );
 

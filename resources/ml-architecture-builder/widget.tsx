@@ -34,6 +34,7 @@ const designNodeSchema = z.object({
   y: z.number(),
   parameters: z.record(z.string(), z.unknown()),
   composite: designCompositeSchema,
+  codeOverride: z.string().optional(),
 });
 
 const propsSchema = z.object({
@@ -168,6 +169,7 @@ export default function MLArchitectureBuilder() {
       const graph = {
         nodes: nodes.map(n => ({
           id: n.id, type: n.type, parameters: n.parameters,
+          codeOverride: n.codeOverride,
           composite: n.composite ? {
             label: n.composite.label,
             nodes: n.composite.nodes.map(cn => ({ id: cn.id, type: cn.type, parameters: cn.parameters })),
@@ -187,6 +189,12 @@ export default function MLArchitectureBuilder() {
   const updateParam = useCallback((nodeId: string, key: string, value: unknown) => {
     setNodes(prev => prev.map(n =>
       n.id === nodeId ? { ...n, parameters: { ...n.parameters, [key]: value } } : n
+    ));
+  }, []);
+
+  const updateCodeOverride = useCallback((nodeId: string, code: string | undefined) => {
+    setNodes(prev => prev.map(n =>
+      n.id === nodeId ? { ...n, codeOverride: code } : n
     ));
   }, []);
 
@@ -486,6 +494,7 @@ export default function MLArchitectureBuilder() {
             edges={edges}
             onParamChange={updateParam}
             onDeleteNode={deleteNode}
+            onCodeOverrideChange={updateCodeOverride}
           />
         </div>
 

@@ -24,6 +24,8 @@ export interface GraphNode {
   y: number;
   parameters: Record<string, unknown>;
   composite?: CompositeBlock;  // only set for type === 'Custom'
+  /** Custom Python forward-pass line. Use {in} for the input var, {out} for output. */
+  codeOverride?: string;
 }
 
 export interface GraphEdge {
