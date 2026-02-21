@@ -924,7 +924,7 @@ server.tool(
       }),
       taskType: z.string().optional().describe("Detected task type from prepare-train"),
       optimizer: z.enum(['Adam', 'AdamW', 'SGD', 'RMSprop', 'Adadelta', 'Adagrad', 'LBFGS']).describe("Optimizer to use"),
-      loss: z.enum(['CrossEntropyLoss', 'MSELoss', 'BCEWithLogitsLoss', 'NLLLoss', 'L1Loss', 'HuberLoss', 'KLDivLoss', 'CTCLoss']).describe("Loss function"),
+      loss: z.enum(['CrossEntropyLoss', 'MSELoss', 'BCELoss', 'BCEWithLogitsLoss', 'NLLLoss', 'L1Loss', 'HuberLoss', 'KLDivLoss', 'CTCLoss']).describe("Loss function"),
       hyperparams: z.object({
         lr:           z.number().describe("Learning rate"),
         batch_size:   z.number().describe("Batch size"),

@@ -1,0 +1,7 @@
+{
+  "dataset": "MiniPile",
+  "optimizer": "Adam",
+  "loss": "CrossEntropyLoss",
+  "taskType": "unknown",
+  "generatedAt": "2026-02-21T23:39:41.104Z"
+}

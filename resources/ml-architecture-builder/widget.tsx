@@ -124,6 +124,7 @@ export default function MLArchitectureBuilder() {
   const { callToolAsync: callGenerate, isPending: isGenerating } = useCallTool('generate-pytorch-code');
   const { callToolAsync: callSave } = useCallTool('save-design');
   const { callToolAsync: callGenTraining, isPending: isGeneratingTraining } = useCallTool('generate-training-code');
+  const { callToolAsync: callGetTraining } = useCallTool('get-training-code');
   const callSaveRef = useRef(callSave);
   callSaveRef.current = callSave;
 
@@ -274,6 +275,20 @@ export default function MLArchitectureBuilder() {
   useEffect(() => {
     if (viewMode === 'design') { setSimRunning(false); setAnimStep(0); }
   }, [viewMode]);
+
+  // ── Train: restore previously generated scripts from server ───────────────
+  const trainScriptsFetchedRef = useRef(false);
+  useEffect(() => {
+    if (viewMode !== 'train' || trainScriptsFetchedRef.current || generatedFiles) return;
+    trainScriptsFetchedRef.current = true;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    callGetTraining({ file: 'all' } as any).then(result => {
+      const sc = result?.structuredContent as { found?: boolean; modelPy?: string; dataPy?: string; trainPy?: string } | undefined;
+      if (sc?.found && (sc.modelPy || sc.trainPy)) {
+        setGeneratedFiles({ modelPy: sc.modelPy ?? '', dataPy: sc.dataPy ?? '', trainPy: sc.trainPy ?? '' });
+      }
+    }).catch(() => {});
+  }, [viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateParam = useCallback((nodeId: string, key: string, value: unknown) => {
     setNodes(prev => prev.map(n =>
@@ -466,24 +481,27 @@ export default function MLArchitectureBuilder() {
 
   const handleGenerateTraining = useCallback(async () => {
     if (!trainSelected) return;
-    const optimizerType = nodes.find(n => OPTIMIZER_TYPES.has(n.type))?.type ?? trainOptimizer;
-    const lossType = nodes.find(n => LOSS_TYPES.has(n.type))?.type ?? trainLoss;
     try {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const result = await callGenTraining({
-        graph: {
-          nodes: nodes.map(n => ({ id: n.id, type: n.type, parameters: n.parameters })),
-          edges: edges.map(e => ({ id: e.id, sourceId: e.sourceId, targetId: e.targetId })),
+        // Server reads graph from savedDesign automatically — no graph field needed
+        dataset: {
+          name: trainSelected.name,
+          source: 'huggingface',
+          hfId: trainSelected.hfId,
         },
-        dataset: { id: trainSelected.id, name: trainSelected.name, hfId: trainSelected.hfId, task: trainSelected.task },
-        optimizer: optimizerType,
-        loss: lossType,
+        optimizer: trainOptimizer,
+        loss: trainLoss,
         hyperparams: { lr: trainLR, batch_size: trainBatchSize, epochs: trainEpochs },
       } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
       const sc = result?.structuredContent as { modelPy?: string; dataPy?: string; trainPy?: string } | undefined;
-      if (sc) setGeneratedFiles({ modelPy: sc.modelPy ?? '', dataPy: sc.dataPy ?? '', trainPy: sc.trainPy ?? '' });
-    } catch { /* ignore */ }
-  }, [nodes, edges, trainSelected, trainOptimizer, trainLoss, trainLR, trainBatchSize, trainEpochs, callGenTraining]);
+      if (sc?.modelPy || sc?.trainPy) {
+        setGeneratedFiles({ modelPy: sc.modelPy ?? '', dataPy: sc.dataPy ?? '', trainPy: sc.trainPy ?? '' });
+      }
+    } catch (err) {
+      console.error('[generate-training-code]', err);
+    }
+  }, [trainSelected, trainOptimizer, trainLoss, trainLR, trainBatchSize, trainEpochs, callGenTraining]);
 
   const handleTrainCopy = useCallback((key: 'model' | 'data' | 'train') => {
     if (!generatedFiles) return;
