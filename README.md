@@ -27,6 +27,7 @@ The server exposes a `runpod-login-deploy` tool that:
 
 1. Configures `runpodctl` with your API key.
 2. Creates a pod using `runpodctl create pod`.
+3. Ensures an SSH key is present on your machine and added to Runpod (defaults to `~/.ssh/id_ed25519`; disable with `ensureKey: false`).
 
 Requirements:
 
@@ -41,15 +42,14 @@ Inputs (high level):
 
 The server also exposes:
 
-- `runpod-pod-ssh-info`: generates a fresh SSH keypair, adds the public key to Runpod, and returns the public key.
 - `runpod-pod-run`: runs a single command on a pod over SSH and returns stdout/stderr.
 
 Common inputs:
 
 - `podId` (required)
 - `ensureKey` (optional): add an SSH key via `runpodctl ssh add-key`
-- `generateKey` (optional, `runpod-pod-ssh-info`): generate a new keypair first (default true)
-- `keyPath` (optional, `runpod-pod-ssh-info`): private key path (default `~/.ssh/id_ed25519`)
+- `generateKey` (optional): generate a new keypair first (default true)
+- `keyPath` (optional): private key path (default `~/.ssh/id_ed25519`)
 - `key` / `keyFile` (optional): SSH public key contents or file path (if you don't want to generate)
 - `host` / `port` / `user` (optional overrides if SSH details cannot be parsed)
 - `identityFile` (optional, `runpod-pod-run`): SSH private key path

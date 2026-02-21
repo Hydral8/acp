@@ -276,7 +276,7 @@ server.tool(
   {
     name: "runpod-login-deploy",
     description:
-      "Configure runpodctl with an API key, then create a Runpod Pod.",
+      "Configure runpodctl with an API key, create a Runpod Pod, and (by default) ensure an SSH key is added.",
     schema: z
       .object({
         apiKey: z.string().describe("Runpod API key"),
@@ -320,6 +320,30 @@ server.tool(
           .array(z.string())
           .optional()
           .describe("Ports, e.g. 8888/http or 22/tcp"),
+        ensureKey: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true, ensure an SSH key is added to Runpod (default: true)"
+          ),
+        generateKey: z
+          .boolean()
+          .optional()
+          .describe(
+            "If true, generate a new SSH keypair first (default: true)"
+          ),
+        keyPath: z
+          .string()
+          .optional()
+          .describe("Path for the private key (default: ~/.ssh/id_ed25519)"),
+        key: z
+          .string()
+          .optional()
+          .describe("Public SSH key contents to add (optional)"),
+        keyFile: z
+          .string()
+          .optional()
+          .describe("Path to public SSH key file to add (optional)"),
       })
       .refine((value) => value.imageName || value.templateId, {
         message: "Provide either imageName or templateId",
@@ -333,6 +357,11 @@ server.tool(
       configStatus: z.string(),
       createStdout: z.string().optional(),
       createStderr: z.string().optional(),
+      publicKey: z.string().optional(),
+      keyFile: z.string().optional(),
+      identityFile: z.string().optional(),
+      addKeyStdout: z.string().optional(),
+      addKeyStderr: z.string().optional(),
     }),
   },
   async (input) => {
@@ -374,86 +403,46 @@ server.tool(
 
     const { stdout, stderr } = await runpodctl(createArgs);
 
-    return object({
-      configStatus: "runpodctl configured",
-      createStdout: stdout || undefined,
-      createStderr: stderr || undefined,
-    });
-  }
-);
-
-server.tool(
-  {
-    name: "runpod-pod-ssh-info",
-    description:
-      "Generate a fresh SSH keypair, add the public key to Runpod, and return the public key.",
-    schema: z.object({
-      podId: z
-        .string()
-        .optional()
-        .describe("Runpod pod ID (optional; not used by this tool)"),
-      ensureKey: z
-        .boolean()
-        .optional()
-        .describe("If true, add an SSH key to Runpod"),
-      generateKey: z
-        .boolean()
-        .optional()
-        .describe("If true, generate a new SSH keypair first (default: true)"),
-      keyPath: z
-        .string()
-        .optional()
-        .describe("Path for the private key (default: ~/.ssh/id_ed25519)"),
-      key: z
-        .string()
-        .optional()
-        .describe("Public SSH key contents to add (optional)"),
-      keyFile: z
-        .string()
-        .optional()
-        .describe("Path to public SSH key file to add (optional)"),
-    }),
-    outputSchema: z.object({
-      publicKey: z.string().optional(),
-      keyFile: z.string().optional(),
-      identityFile: z.string().optional(),
-      addKeyStdout: z.string().optional(),
-      addKeyStderr: z.string().optional(),
-    }),
-  },
-  async (input) => {
     const identityFile =
       resolveHomePath(input.keyPath) ??
       path.join(homedir(), ".ssh", "id_ed25519");
 
-    if (input.generateKey !== false) {
-      await generateSshKeyPair(identityFile);
-    }
-
-    const publicKeyFile = `${identityFile}.pub`;
-    const { publicKey, keyFile } = await readPublicKey(
-      input.key,
-      input.keyFile ?? publicKeyFile
-    );
-
-    if (!publicKey) {
-      throw new Error(
-        "No public SSH key found. Provide `key` or `keyFile`, or create ~/.ssh/id_ed25519.pub."
-      );
-    }
-
+    let publicKey: string | undefined;
+    let keyFile: string | undefined;
     let addKeyStdout: string | undefined;
     let addKeyStderr: string | undefined;
+
     if (input.ensureKey !== false) {
+      if (input.generateKey !== false) {
+        await generateSshKeyPair(identityFile);
+      }
+
+      const publicKeyFile = `${identityFile}.pub`;
+      const keyData = await readPublicKey(
+        input.key,
+        input.keyFile ?? publicKeyFile
+      );
+      publicKey = keyData.publicKey;
+      keyFile = keyData.keyFile;
+
+      if (!publicKey) {
+        throw new Error(
+          "No public SSH key found. Provide `key` or `keyFile`, or create ~/.ssh/id_ed25519.pub."
+        );
+      }
+
       const result = await ensureRunpodSshKey(publicKey, keyFile);
       addKeyStdout = result.stdout || undefined;
       addKeyStderr = result.stderr || undefined;
     }
 
     return object({
+      configStatus: "runpodctl configured",
+      createStdout: stdout || undefined,
+      createStderr: stderr || undefined,
       publicKey,
       keyFile,
-      identityFile,
+      identityFile: input.ensureKey !== false ? identityFile : undefined,
       addKeyStdout,
       addKeyStderr,
     });
@@ -528,16 +517,26 @@ server.tool(
       user: input.user,
     });
 
-    const host = info.host;
-    const port = info.port ?? 22;
-    const user = info.user ?? "root";
+    const mode = input.mode ?? "proxy";
+
+    const podIdWithSuffix = input.podId.endsWith("-64411bc6")
+      ? input.podId
+      : `${input.podId}-64411bc6`;
+    const host =
+      input.host ??
+      (mode === "proxy" ? "ssh.runpod.io" : info.host);
+    const user =
+      input.user ??
+      (mode === "proxy" ? podIdWithSuffix : info.user ?? "root");
+    const port =
+      input.port ??
+      (mode === "proxy" ? 22 : info.port ?? 22);
     if (!host) {
       throw new Error(
         "Unable to determine SSH host. Provide host/port/user overrides."
       );
     }
 
-    const mode = input.mode ?? "proxy";
     const allocatePty = input.allocatePty !== false;
     const baseArgs = ["-p", String(port)];
     if (input.identityFile) baseArgs.push("-i", input.identityFile);
