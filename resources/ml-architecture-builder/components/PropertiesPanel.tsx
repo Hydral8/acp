@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react';
 import { GraphNode, GraphEdge, BLOCK_DEFS, CATEGORY_COLORS } from '../types';
 
 function topoSort(nodes: GraphNode[], edges: GraphEdge[]): GraphNode[] {
@@ -19,9 +20,26 @@ interface Props {
   edges: GraphEdge[];
   onParamChange: (nodeId: string, key: string, value: unknown) => void;
   onDeleteNode: (nodeId: string) => void;
+  onCodeOverrideChange: (nodeId: string, code: string | undefined) => void;
 }
 
-export function PropertiesPanel({ selectedNodes, edges, onParamChange, onDeleteNode }: Props) {
+export function PropertiesPanel({ selectedNodes, edges, onParamChange, onDeleteNode, onCodeOverrideChange }: Props) {
+  const [codeEnabled, setCodeEnabled] = useState(false);
+  const [codeDraft, setCodeDraft] = useState('');
+
+  // Sync local state when selection changes
+  const activeNode = selectedNodes.length === 1 ? selectedNodes[0] : null;
+  useEffect(() => {
+    if (activeNode) {
+      const hasOverride = !!activeNode.codeOverride;
+      setCodeEnabled(hasOverride);
+      setCodeDraft(activeNode.codeOverride ?? '');
+    } else {
+      setCodeEnabled(false);
+      setCodeDraft('');
+    }
+  }, [activeNode?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const panelStyle: React.CSSProperties = {
     width: 216,
     minWidth: 216,
@@ -263,8 +281,81 @@ export function PropertiesPanel({ selectedNodes, edges, onParamChange, onDeleteN
           </div>
         )}
 
+        {/* ── Code Override ────────────────────────────────────────────── */}
+        <div style={{ borderTop: '1px solid #141414', margin: '12px 0 10px' }} />
+
+        <div style={{ marginBottom: 10 }}>
+          {/* Header row with toggle */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: codeEnabled ? 8 : 0 }}>
+            <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase' as const, fontWeight: 700, flex: 1 }}>
+              Code Override
+            </div>
+            {selectedNode.codeOverride && (
+              <span style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, backgroundColor: '#1a1200', color: '#fde68a', border: '1px solid #ca8a0450', fontWeight: 700 }}>
+                active
+              </span>
+            )}
+            <button
+              onClick={() => {
+                const next = !codeEnabled;
+                setCodeEnabled(next);
+                if (!next) {
+                  setCodeDraft('');
+                  onCodeOverrideChange(selectedNode.id, undefined);
+                }
+              }}
+              style={{
+                padding: '2px 8px',
+                backgroundColor: codeEnabled ? '#0a1a0a' : '#111',
+                border: `1px solid ${codeEnabled ? '#166534' : '#252525'}`,
+                borderRadius: 3,
+                color: codeEnabled ? '#4ade80' : '#444',
+                cursor: 'pointer',
+                fontSize: 9,
+                fontWeight: 700,
+                letterSpacing: 0.3,
+              }}
+            >
+              {codeEnabled ? 'On' : 'Off'}
+            </button>
+          </div>
+
+          {codeEnabled && (
+            <>
+              <textarea
+                value={codeDraft}
+                onChange={e => setCodeDraft(e.target.value)}
+                onBlur={() => onCodeOverrideChange(selectedNode.id, codeDraft.trim() || undefined)}
+                rows={4}
+                spellCheck={false}
+                placeholder={`{out} = self.fc({in})`}
+                style={{
+                  width: '100%',
+                  padding: '6px 8px',
+                  backgroundColor: '#080808',
+                  border: `1px solid ${colors.border}55`,
+                  borderRadius: 4,
+                  color: '#a8e6a3',
+                  fontSize: 10.5,
+                  fontFamily: '"Fira Code", "Cascadia Code", "JetBrains Mono", monospace',
+                  lineHeight: 1.55,
+                  outline: 'none',
+                  resize: 'vertical' as const,
+                  boxSizing: 'border-box' as const,
+                  whiteSpace: 'pre' as const,
+                }}
+                onFocus={e => (e.target.style.borderColor = colors.border + '99')}
+                onBlurCapture={e => (e.currentTarget.style.borderColor = colors.border + '55')}
+              />
+              <div style={{ fontSize: 9, color: '#2e2e2e', marginTop: 4, lineHeight: 1.5 }}>
+                <span style={{ color: '#444' }}>{'{in}'}</span> = input tensor &nbsp;·&nbsp; <span style={{ color: '#444' }}>{'{out}'}</span> = output tensor
+              </div>
+            </>
+          )}
+        </div>
+
         {/* Separator */}
-        <div style={{ borderTop: '1px solid #141414', margin: '12px 0' }} />
+        <div style={{ borderTop: '1px solid #141414', margin: '4px 0 12px' }} />
 
         {/* Delete */}
         <button

@@ -49,8 +49,8 @@ export function EdgeLayer({ nodes, edges, pending, onDeleteEdge }: Props) {
         const s = getPortPos(src, 'output');
         const t = getPortPos(tgt, 'input');
         const path = bezier(s.x, s.y, t.x, t.y);
-        const def = BLOCK_DEFS.find(d => d.type === src.type)!;
-        const color = CATEGORY_COLORS[def.category].port;
+        const def = BLOCK_DEFS.find(d => d.type === src.type);
+        const color = CATEGORY_COLORS[def?.category ?? 'composite'].port;
 
         return (
           <g key={edge.id}>
@@ -81,8 +81,8 @@ export function EdgeLayer({ nodes, edges, pending, onDeleteEdge }: Props) {
         const src = nodeMap[pending.sourceId];
         if (!src) return null;
         const s = getPortPos(src, 'output');
-        const def = BLOCK_DEFS.find(d => d.type === src.type)!;
-        const color = CATEGORY_COLORS[def.category].port;
+        const def = BLOCK_DEFS.find(d => d.type === src.type);
+        const color = CATEGORY_COLORS[def?.category ?? 'composite'].port;
         const path = bezier(s.x, s.y, pending.mouseX, pending.mouseY);
         return (
           <path

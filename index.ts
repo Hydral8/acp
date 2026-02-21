@@ -43,6 +43,7 @@ const nodeSchema = z.object({
   type: z.string(),
   parameters: z.record(z.string(), z.unknown()),
   composite: compositeSchema,
+  codeOverride: z.string().optional(),
 });
 
 const edgeSchema = z.object({
@@ -624,7 +625,7 @@ server.tool(
 server.tool(
   {
     name: "render-model-builder",
-    description: "Open the visual ML architecture builder to design a neural network",
+    description: "Open the visual ML architecture builder. If design-architecture was called beforehand, the designed layout is preloaded. Otherwise opens a blank canvas for manual editing.",
     schema: z.object({}),
     widget: {
       name: "ml-architecture-builder",
@@ -633,12 +634,15 @@ server.tool(
     },
   },
   async () => {
+    const layout = designedLayout;
+    designedLayout = null; // consume — next blank call gets empty canvas
+    const hasDesign = layout !== null && layout.nodes.length > 0;
     return widget({
-      props: {},
+      props: hasDesign ? { initialNodes: layout!.nodes, initialEdges: layout!.edges } : {},
       output: text(
-        "ML Architecture Builder is ready. " +
-        "Drag blocks from the left panel onto the canvas, connect them by dragging from output ports (bottom) to input ports (top), " +
-        "then click 'Generate Model' to produce PyTorch code."
+        hasDesign
+          ? `Architecture loaded with ${layout!.nodes.length} layer${layout!.nodes.length !== 1 ? 's' : ''} and ${layout!.edges.length} connection${layout!.edges.length !== 1 ? 's' : ''}. Use the visual builder to inspect or edit it.`
+          : "ML Architecture Builder is ready. Drag blocks from the left panel onto the canvas, connect them by dragging between ports, then click 'Generate Model' to produce PyTorch code."
       ),
     });
   }
@@ -668,6 +672,186 @@ server.tool(
   }
 );
 
+// ── Node metadata for simulation ─────────────────────────────────────────────
+
+const LAYER_LABELS: Record<string, string> = {
+  Input: 'Input', Linear: 'Linear', Conv2D: 'Conv2D', Flatten: 'Flatten',
+  BatchNorm: 'BatchNorm', Dropout: 'Dropout', LayerNorm: 'LayerNorm',
+  MultiHeadAttn: 'MultiHead Attn', Tokenizer: 'Tokenizer', Embedding: 'Embedding',
+  SinePE: 'Sine PE', RoPE: 'RoPE', LearnedPE: 'Learned PE',
+  ReLU: 'ReLU', GELU: 'GELU', Sigmoid: 'Sigmoid', Tanh: 'Tanh', Softmax: 'Softmax',
+  ResidualAdd: 'Residual Add', Concatenate: 'Concatenate',
+  TransformerBlock: 'Transformer', ConvBNReLU: 'Conv-BN-ReLU',
+  ResNetBlock: 'ResNet Block', MLPBlock: 'MLP Block', Custom: 'Custom',
+};
+
+const LAYER_CATS: Record<string, string> = {
+  Input: 'core', Linear: 'core', Conv2D: 'core', Flatten: 'core',
+  BatchNorm: 'core', Dropout: 'core', LayerNorm: 'core',
+  MultiHeadAttn: 'core', Tokenizer: 'core', Embedding: 'core',
+  SinePE: 'core', RoPE: 'core', LearnedPE: 'core',
+  ReLU: 'activation', GELU: 'activation', Sigmoid: 'activation',
+  Tanh: 'activation', Softmax: 'activation',
+  ResidualAdd: 'structural', Concatenate: 'structural',
+  TransformerBlock: 'composite', ConvBNReLU: 'composite',
+  ResNetBlock: 'composite', MLPBlock: 'composite', Custom: 'composite',
+};
+
+// ── Training helpers ───────────────────────────────────────────────────────
+
+type TaskType = 'nlp_lm' | 'nlp_classification' | 'vision' | 'tabular' | 'rlhf' | 'unknown';
+type DatasetCategory = 'llm' | 'vlm' | 'rlhf' | 'cv' | 'tabular';
+
+interface TaskAnalysis {
+  taskType: TaskType;
+  category: DatasetCategory;
+  suggestedLoss: string;
+  suggestedOptimizer: string;
+  description: string;
+}
+
+function detectTask(graph: GraphInput): TaskAnalysis {
+  const types = new Set(graph.nodes.map(n => n.type));
+  const hasNLP    = types.has('Tokenizer') || types.has('Embedding') || types.has('TransformerBlock') || types.has('MultiHeadAttn');
+  const hasVision = types.has('Conv2D')    || types.has('ConvBNReLU') || types.has('ResNetBlock');
+  const hasSoftmax = types.has('Softmax');
+  const hasRLHFPair = types.has('Sigmoid') && (types.has('Embedding') || types.has('Linear'));
+
+  if (hasNLP && hasRLHFPair && !hasSoftmax) {
+    return { taskType: 'rlhf', category: 'rlhf', suggestedLoss: 'BCEWithLogitsLoss', suggestedOptimizer: 'AdamW', description: 'RLHF / reward model (NLP with preference pairs)' };
+  }
+  if (hasNLP) {
+    if (hasSoftmax) return { taskType: 'nlp_classification', category: 'llm', suggestedLoss: 'CrossEntropyLoss', suggestedOptimizer: 'AdamW', description: 'NLP classification / token prediction' };
+    return { taskType: 'nlp_lm', category: 'llm', suggestedLoss: 'CrossEntropyLoss', suggestedOptimizer: 'AdamW', description: 'Language model / causal LM' };
+  }
+  if (hasVision && (types.has('Embedding') || types.has('TransformerBlock'))) {
+    return { taskType: 'vision', category: 'vlm', suggestedLoss: 'CrossEntropyLoss', suggestedOptimizer: 'AdamW', description: 'Vision-language model' };
+  }
+  if (hasVision) {
+    return { taskType: 'vision', category: 'cv', suggestedLoss: 'CrossEntropyLoss', suggestedOptimizer: 'Adam', description: 'Computer vision / image classification' };
+  }
+  const hasLinear = types.has('Linear') || types.has('MLPBlock');
+  if (hasLinear) {
+    const hasMSE = types.has('MSELoss');
+    return { taskType: 'tabular', category: 'tabular', suggestedLoss: hasMSE ? 'MSELoss' : 'CrossEntropyLoss', suggestedOptimizer: 'Adam', description: 'Tabular / structured data model' };
+  }
+  return { taskType: 'unknown', category: 'llm', suggestedLoss: 'CrossEntropyLoss', suggestedOptimizer: 'Adam', description: 'Unknown task type' };
+}
+
+function computeShapeAnnotations(graph: GraphInput): Record<string, string> {
+  const annotations: Record<string, string> = {};
+  const sorted  = topologicalSort(graph.nodes, graph.edges);
+  const incoming = new Map<string, string[]>();
+  for (const n of graph.nodes) incoming.set(n.id, []);
+  for (const e of graph.edges) incoming.get(e.targetId)?.push(e.sourceId);
+
+  const shapes = new Map<string, number[] | null>();
+  for (const node of sorted) {
+    const inIds = incoming.get(node.id) ?? [];
+    const inShape = inIds.length > 0 ? (shapes.get(inIds[0]) ?? null) : null;
+    const q = node.parameters;
+    const v = (k: string, fb = 0) => (typeof q[k] === 'number' ? (q[k] as number) : fb);
+    let out: number[] | null = null;
+    switch (node.type) {
+      case 'Input':    out = (q.shape as number[] | undefined) ?? null; break;
+      case 'Linear': case 'MLPBlock': {
+        const o = v('out_features', 64);
+        out = inShape ? [...inShape.slice(0, -1), o] : null; break;
+      }
+      case 'Conv2D': case 'ConvBNReLU': {
+        if (inShape && inShape.length >= 3) {
+          const oc = v('out_channels', 32), k = v('kernel_size', 3), s = v('stride', 1), pad = v('padding', 0);
+          const ci = inShape.length >= 4 ? 1 : 0;
+          const o2 = [...inShape]; o2[ci] = oc;
+          for (let d = ci + 1; d < o2.length; d++) o2[d] = Math.floor((o2[d] + 2 * pad - k) / s + 1);
+          out = o2;
+        } break;
+      }
+      case 'Flatten': {
+        if (inShape) {
+          const sd = v('start_dim', 1);
+          const flat = inShape.slice(sd).reduce((a, b) => a * b, 1);
+          out = [...inShape.slice(0, sd), flat];
+        } break;
+      }
+      case 'Tokenizer': out = [v('max_length', 512)]; break;
+      case 'Embedding': out = inShape ? [...inShape, v('embedding_dim', 512)] : null; break;
+      default: out = inShape; break;
+    }
+    shapes.set(node.id, out);
+    if (out) annotations[node.id] = `[${out.join('×')}]`;
+  }
+  return annotations;
+}
+
+// ── Tool: prepare-train ────────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "prepare-train",
+    description:
+      "Select a training dataset and preview data flowing through the model. " +
+      "Pass the graph from render-model-builder to animate the real architecture — " +
+      "omit it to use a demo graph.",
+    schema: z.object({
+      graph: graphSchema.optional().describe(
+        "Architecture graph from the model builder (nodes + edges). " +
+        "When provided the simulation shows the actual model layers."
+      ),
+    }),
+    widget: {
+      name: "dataset-prep",
+      invoking: "Loading dataset setup…",
+      invoked: "Dataset setup ready",
+    },
+  },
+  async ({ graph }) => {
+    // Use provided graph, or fall back to savedDesign, or empty
+    const g = (graph && graph.nodes.length > 0) ? graph : savedDesign ?? null;
+
+    let modelNodes: Array<{ id: string; label: string; cat: string }> = [];
+    let taskInfo: TaskAnalysis | null = null;
+    let shapeAnnotations: Record<string, string> = {};
+
+    if (g && g.nodes.length > 0) {
+      taskInfo = detectTask(g as GraphInput);
+      shapeAnnotations = computeShapeAnnotations(g as GraphInput);
+
+      const layerNodes = g.nodes.filter(n => !TRAINING_TYPES.has(n.type));
+      const layerEdges = g.edges.filter(
+        e => layerNodes.some(n => n.id === e.sourceId) &&
+             layerNodes.some(n => n.id === e.targetId)
+      );
+      const sorted = topologicalSort(layerNodes as NodeInput[], layerEdges as EdgeInput[]);
+      modelNodes = sorted.map(n => ({
+        id:    n.id,
+        label: LAYER_LABELS[n.type] ?? n.type,
+        cat:   LAYER_CATS[n.type]   ?? 'core',
+        shape: shapeAnnotations[n.id] ?? '',
+      }));
+    }
+
+    return widget({
+      props: {
+        modelNodes,
+        taskType:          taskInfo?.taskType          ?? null,
+        suggestedCategory: taskInfo?.category          ?? null,
+        suggestedLoss:     taskInfo?.suggestedLoss     ?? 'CrossEntropyLoss',
+        suggestedOptimizer:taskInfo?.suggestedOptimizer ?? 'Adam',
+        shapeAnnotations,
+      },
+      output: text(
+        taskInfo
+          ? `Training setup ready. Detected: ${taskInfo.description}. ` +
+            `${modelNodes.length} layers loaded. Suggested loss: ${taskInfo.suggestedLoss}, ` +
+            `optimizer: ${taskInfo.suggestedOptimizer}. ` +
+            "Adjust the dataset and hyperparameters in the widget, then generate training scripts."
+          : "Training setup ready. No model design found — build an architecture first with design-architecture + render-model-builder."
+      ),
+    });
+  }
+);
+
 // ── Tool: validate-graph ───────────────────────────────────────────────────
 
 server.tool(
@@ -687,6 +871,223 @@ server.tool(
     return object({ valid: errors.length === 0, errors });
   }
 );
+
+// ── Tool: generate-training-code ───────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'generate-training-code',
+    description: 'Generate modular Python training files (model.py, data.py, train.py) from the current model design and chosen training config. Reads the current graph from savedDesign automatically.',
+    schema: z.object({
+      dataset: z.object({
+        name: z.string().describe("Human-readable dataset name"),
+        source: z.enum(['huggingface', 'torchvision', 'custom']).describe("Where the dataset comes from"),
+        hfId: z.string().optional().describe("HuggingFace dataset id, e.g. 'roneneldan/TinyStories'"),
+        torchvisionName: z.string().optional().describe("torchvision class name, e.g. 'MNIST', 'CIFAR10'"),
+      }),
+      taskType: z.string().optional().describe("Detected task type from prepare-train"),
+      optimizer: z.enum(['Adam', 'AdamW', 'SGD', 'RMSprop']).describe("Optimizer to use"),
+      loss: z.enum(['CrossEntropyLoss', 'MSELoss', 'BCEWithLogitsLoss', 'NLLLoss']).describe("Loss function"),
+      hyperparams: z.object({
+        lr:           z.number().describe("Learning rate"),
+        batch_size:   z.number().describe("Batch size"),
+        epochs:       z.number().describe("Training epochs"),
+        weight_decay: z.number().optional().describe("Weight decay (default 0)"),
+      }),
+    }),
+    outputSchema: z.object({ modelPy: z.string(), dataPy: z.string(), trainPy: z.string(), summary: z.string() }),
+  },
+  async ({ dataset, taskType, optimizer, loss, hyperparams }) => {
+    const graph = savedDesign;
+    const modelPy = graph ? generatePyTorchCode(graph as GraphInput) : '# No model design found. Build one with design-architecture first.\n';
+    const dataPy  = generateDataPy(dataset, taskType ?? 'unknown', hyperparams.batch_size);
+    const trainPy = generateTrainPy(optimizer, loss, hyperparams);
+    return object({
+      modelPy,
+      dataPy,
+      trainPy,
+      summary: `Generated model.py (${modelPy.split('\n').length} lines), data.py (${dataPy.split('\n').length} lines), train.py (${trainPy.split('\n').length} lines).`,
+    });
+  }
+);
+
+// ── Training code-gen helpers ───────────────────────────────────────────────
+
+function generateDataPy(
+  dataset: { name: string; source: string; hfId?: string; torchvisionName?: string },
+  taskType: string,
+  batchSize: number,
+): string {
+  const bs = batchSize;
+  if (dataset.source === 'huggingface') {
+    const hfId = dataset.hfId ?? 'dataset/name';
+    const isNLP = taskType.startsWith('nlp') || taskType === 'rlhf';
+    return `"""data.py — HuggingFace dataset loader for ${dataset.name}"""
+from datasets import load_dataset
+from torch.utils.data import DataLoader
+${isNLP ? "from transformers import AutoTokenizer" : "import torchvision.transforms as T"}
+
+DATASET_ID  = "${hfId}"
+BATCH_SIZE  = ${bs}
+MAX_LENGTH  = 512   # tokens${isNLP ? `
+TOKENIZER   = "gpt2"  # swap for your tokenizer
+
+def get_dataloaders(batch_size=BATCH_SIZE, hf_token=None):
+    ds = load_dataset(DATASET_ID, token=hf_token)
+    tok = AutoTokenizer.from_pretrained(TOKENIZER)
+    tok.pad_token = tok.eos_token
+
+    def tokenize(batch):
+        return tok(batch["text"], truncation=True, max_length=MAX_LENGTH, padding="max_length")
+
+    train_ds = ds["train"].map(tokenize, batched=True, remove_columns=ds["train"].column_names)
+    val_ds   = ds.get("validation") or ds.get("test")
+    if val_ds:
+        val_ds = val_ds.map(tokenize, batched=True, remove_columns=val_ds.column_names)
+
+    train_ds.set_format("torch")
+    if val_ds: val_ds.set_format("torch")
+
+    return (
+        DataLoader(train_ds, batch_size=batch_size, shuffle=True),
+        DataLoader(val_ds,   batch_size=batch_size) if val_ds else None,
+    )` : `
+
+def get_dataloaders(batch_size=BATCH_SIZE, hf_token=None):
+    ds = load_dataset(DATASET_ID, token=hf_token)
+    # TODO: define transforms and adjust column names for your dataset
+    transform = T.Compose([T.ToTensor(), T.Normalize((0.5,), (0.5,))])
+    train_ds = ds["train"]
+    val_ds   = ds.get("validation") or ds.get("test")
+    return (
+        DataLoader(train_ds, batch_size=batch_size, shuffle=True),
+        DataLoader(val_ds,   batch_size=batch_size) if val_ds else None,
+    )`}
+`;
+  }
+
+  if (dataset.source === 'torchvision') {
+    const cls = dataset.torchvisionName ?? 'CIFAR10';
+    const isGrayscale = cls === 'MNIST' || cls === 'FashionMNIST';
+    const norm = isGrayscale ? '(0.5,), (0.5,)' : '(0.485, 0.456, 0.406), (0.229, 0.224, 0.225)';
+    return `"""data.py — torchvision ${cls} loader"""
+import torchvision
+import torchvision.transforms as T
+from torch.utils.data import DataLoader
+
+BATCH_SIZE = ${bs}
+
+def get_dataloaders(batch_size=BATCH_SIZE):
+    transform = T.Compose([T.ToTensor(), T.Normalize(${norm})])
+    train_set = torchvision.datasets.${cls}(root="./data", train=True,  download=True, transform=transform)
+    val_set   = torchvision.datasets.${cls}(root="./data", train=False, download=True, transform=transform)
+    return (
+        DataLoader(train_set, batch_size=batch_size, shuffle=True,  num_workers=2),
+        DataLoader(val_set,   batch_size=batch_size, shuffle=False, num_workers=2),
+    )
+`;
+  }
+
+  // custom / fallback
+  return `"""data.py — custom dataset loader"""
+from torch.utils.data import Dataset, DataLoader
+import torch
+
+BATCH_SIZE = ${bs}
+
+class CustomDataset(Dataset):
+    def __init__(self, split="train"):
+        # TODO: load your data here
+        self.data   = torch.randn(1000, 3, 32, 32)  # placeholder
+        self.labels = torch.randint(0, 10, (1000,))  # placeholder
+
+    def __len__(self):  return len(self.labels)
+    def __getitem__(self, i): return self.data[i], self.labels[i]
+
+def get_dataloaders(batch_size=BATCH_SIZE):
+    return (
+        DataLoader(CustomDataset("train"), batch_size=batch_size, shuffle=True),
+        DataLoader(CustomDataset("val"),   batch_size=batch_size),
+    )
+`;
+}
+
+function generateTrainPy(
+  optimizer: string,
+  loss: string,
+  hp: { lr: number; batch_size: number; epochs: number; weight_decay?: number },
+): string {
+  const wd = hp.weight_decay ?? 0;
+  const optArgs = optimizer === 'SGD'
+    ? `model.parameters(), lr=${hp.lr}, momentum=0.9, weight_decay=${wd}`
+    : `model.parameters(), lr=${hp.lr}, weight_decay=${wd}`;
+  const lossInit = loss === 'MSELoss'
+    ? 'nn.MSELoss()'
+    : loss === 'BCEWithLogitsLoss'
+    ? 'nn.BCEWithLogitsLoss()'
+    : 'nn.CrossEntropyLoss()';
+
+  return `"""train.py — training loop"""
+import torch
+import torch.nn as nn
+from model import Model
+from data import get_dataloaders
+
+DEVICE    = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+LR        = ${hp.lr}
+BATCH     = ${hp.batch_size}
+EPOCHS    = ${hp.epochs}
+SAVE_PATH = "checkpoint_best.pt"
+
+
+def train():
+    model     = Model().to(DEVICE)
+    optimizer = torch.optim.${optimizer}(${optArgs})
+    criterion = ${lossInit}
+    train_loader, val_loader = get_dataloaders(batch_size=BATCH)
+
+    best_val = float("inf")
+
+    for epoch in range(1, EPOCHS + 1):
+        # ── training ──────────────────────────────────────────────────────
+        model.train()
+        train_loss = 0.0
+        for batch in train_loader:
+            x, y = batch[0].to(DEVICE), batch[1].to(DEVICE)
+            optimizer.zero_grad()
+            out  = model(x)
+            loss = criterion(out, y)
+            loss.backward()
+            optimizer.step()
+            train_loss += loss.item()
+        train_loss /= len(train_loader)
+
+        # ── validation ────────────────────────────────────────────────────
+        val_info = ""
+        if val_loader:
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for batch in val_loader:
+                    x, y = batch[0].to(DEVICE), batch[1].to(DEVICE)
+                    val_loss += criterion(model(x), y).item()
+            val_loss /= len(val_loader)
+            val_info = f"  val={val_loss:.4f}"
+            if val_loss < best_val:
+                best_val = val_loss
+                torch.save(model.state_dict(), SAVE_PATH)
+                val_info += " ✓saved"
+
+        print(f"Epoch {epoch:03d}/{EPOCHS}  train={train_loss:.4f}{val_info}")
+
+    torch.save(model.state_dict(), "model_final.pt")
+    print(f"Done. Best val loss: {best_val:.4f}")
+
+
+if __name__ == "__main__":
+    train()
+`;
+}
 
 // ── Validation ─────────────────────────────────────────────────────────────
 
@@ -863,6 +1264,16 @@ function emitNode(
   forwardLines: string[],
   li: number,
 ): void {
+  // ── Code override: user-supplied forward line takes precedence ──────────────
+  if (node.codeOverride) {
+    const line = node.codeOverride.trim()
+      .replace(/\{in\}/g,  inVar)
+      .replace(/\{out\}/g, outVar);
+    forwardLines.push(`# ${node.type} (custom override)`);
+    forwardLines.push(line);
+    return;
+  }
+
   const q = node.parameters;
   switch (node.type) {
     case "Input":
@@ -1119,6 +1530,556 @@ def eval_step(batch_x, batch_y):
     return loss.item()
 `;
 }
+
+// ── design-architecture helpers ────────────────────────────────────────────
+
+const NODE_W = 140;
+const NODE_H = 64;
+
+type BlockCategory = 'core' | 'activation' | 'structural' | 'training' | 'composite';
+interface BlockTypeDef {
+  label: string; category: BlockCategory;
+  defaultParams: Record<string, unknown>;
+  hasInput: boolean; hasOutput: boolean;
+  description: string;
+}
+
+const BLOCK_CATALOG: Record<string, BlockTypeDef> = {
+  // ── Core Layers ──────────────────────────────────────────────────────────
+  Input:            { label: 'Input',          category: 'core', hasInput: false, hasOutput: true,  defaultParams: { shape: [1, 28, 28] },                                                              description: 'Source node. shape: output tensor dims (no batch dim)' },
+  Linear:           { label: 'Linear',         category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { in_features: 128, out_features: 64, bias: true },                                  description: 'Fully-connected y = xW^T + b. Transforms last dim in_features → out_features' },
+  Conv2D:           { label: 'Conv2D',         category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { in_channels: 1, out_channels: 32, kernel_size: 3, stride: 1, padding: 0 },         description: '2D convolution. Out spatial: floor((H+2P-K)/S+1)' },
+  Flatten:          { label: 'Flatten',        category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { start_dim: 1 },                                                                    description: 'Flatten from start_dim onward into one dimension' },
+  BatchNorm:        { label: 'BatchNorm',      category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { num_features: 64 },                                                                description: 'Batch normalization. num_features must match channel count' },
+  Dropout:          { label: 'Dropout',        category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { p: 0.5 },                                                                          description: 'Randomly zeros elements with probability p during training' },
+  LayerNorm:        { label: 'LayerNorm',      category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { normalized_shape: 512 },                                                           description: 'Layer normalization over last dim. normalized_shape must match last dim' },
+  MultiHeadAttn:    { label: 'MultiHead Attn', category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { embed_dim: 512, num_heads: 8 },                                                    description: 'Multi-head self-attention. embed_dim must match last dim and be divisible by num_heads' },
+  Tokenizer:        { label: 'Tokenizer',      category: 'core', hasInput: false, hasOutput: true,  defaultParams: { vocab_size: 30000, max_length: 512 },                                              description: 'Text tokenizer. Outputs integer token IDs with shape [max_length]' },
+  Embedding:        { label: 'Embedding',      category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { num_embeddings: 30000, embedding_dim: 512, padding_idx: 0 },                       description: 'Lookup table. Input: token IDs → Output: [..., embedding_dim]' },
+  SinePE:           { label: 'Sine PE',        category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { d_model: 512, max_len: 512, dropout: 0.1 },                                        description: 'Fixed sinusoidal positional encoding (Vaswani 2017). Passthrough shape' },
+  RoPE:             { label: 'RoPE',           category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { dim: 64, max_seq_len: 2048 },                                                      description: 'Rotary positional encoding (Su 2021, LLaMA-style). Passthrough shape' },
+  LearnedPE:        { label: 'Learned PE',     category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { max_len: 512, d_model: 512 },                                                      description: 'BERT-style learned positional embeddings. Passthrough shape' },
+  // ── Activations ──────────────────────────────────────────────────────────
+  ReLU:             { label: 'ReLU',           category: 'activation', hasInput: true, hasOutput: true, defaultParams: {},           description: 'max(0,x). Passthrough shape' },
+  GELU:             { label: 'GELU',           category: 'activation', hasInput: true, hasOutput: true, defaultParams: {},           description: 'Gaussian Error Linear Unit. Common in transformers. Passthrough shape' },
+  Sigmoid:          { label: 'Sigmoid',        category: 'activation', hasInput: true, hasOutput: true, defaultParams: {},           description: 'σ(x) = 1/(1+e^-x). Output in (0,1). Passthrough shape' },
+  Tanh:             { label: 'Tanh',           category: 'activation', hasInput: true, hasOutput: true, defaultParams: {},           description: 'tanh(x). Output in (-1,1). Passthrough shape' },
+  Softmax:          { label: 'Softmax',        category: 'activation', hasInput: true, hasOutput: true, defaultParams: { dim: -1 }, description: 'Softmax over dim. Converts logits to probabilities. Passthrough shape' },
+  // ── Structural ───────────────────────────────────────────────────────────
+  ResidualAdd:      { label: 'Residual Add',   category: 'structural', hasInput: true, hasOutput: true, defaultParams: {},           description: 'Identity skip connection. Adds input to itself. Passthrough shape' },
+  Concatenate:      { label: 'Concatenate',    category: 'structural', hasInput: true, hasOutput: true, defaultParams: { dim: 1 },  description: 'Concatenate tensors along dim' },
+  // ── Training Config ──────────────────────────────────────────────────────
+  SGD:              { label: 'SGD Optimizer',     category: 'training', hasInput: false, hasOutput: false, defaultParams: { lr: 0.01, momentum: 0.9 }, description: 'SGD optimizer. Standalone config node (no data flow)' },
+  Adam:             { label: 'Adam Optimizer',    category: 'training', hasInput: false, hasOutput: false, defaultParams: { lr: 0.001 },              description: 'Adam optimizer. Standalone config node (no data flow)' },
+  MSELoss:          { label: 'MSE Loss',          category: 'training', hasInput: false, hasOutput: false, defaultParams: {},                          description: 'MSE loss for regression. Standalone config node' },
+  CrossEntropyLoss: { label: 'CrossEntropy Loss', category: 'training', hasInput: false, hasOutput: false, defaultParams: {},                          description: 'Cross-entropy loss + softmax for classification. Standalone config node' },
+  // ── Composite ────────────────────────────────────────────────────────────
+  TransformerBlock: { label: 'Transformer',   category: 'composite', hasInput: true, hasOutput: true, defaultParams: { d_model: 512, nhead: 8, dim_feedforward: 2048, dropout: 0.1 },                          description: 'Transformer encoder block: MultiHeadAttn + LayerNorm + FFN + LayerNorm' },
+  ConvBNReLU:       { label: 'Conv-BN-ReLU',  category: 'composite', hasInput: true, hasOutput: true, defaultParams: { in_channels: 3, out_channels: 64, kernel_size: 3, stride: 1, padding: 1 },             description: 'Conv2D → BatchNorm → ReLU fused block. Standard CNN building block' },
+  ResNetBlock:      { label: 'ResNet Block',   category: 'composite', hasInput: true, hasOutput: true, defaultParams: { channels: 64, stride: 1 },                                                              description: 'Residual block: two Conv-BN-ReLU layers with identity skip connection' },
+  MLPBlock:         { label: 'MLP Block',      category: 'composite', hasInput: true, hasOutput: true, defaultParams: { in_features: 512, hidden_features: 2048, out_features: 512, dropout: 0.0 },           description: 'Two-layer MLP: Linear → GELU → Dropout → Linear. Used in transformer FFN' },
+};
+
+// Derived default params lookup (used in auto-layout and shape engine fallback)
+const BLOCK_DEFAULT_PARAMS: Record<string, Record<string, unknown>> = Object.fromEntries(
+  Object.entries(BLOCK_CATALOG).map(([k, v]) => [k, v.defaultParams])
+);
+
+// ── Runtime custom type registries ─────────────────────────────────────────
+
+interface CustomTypeDef {
+  label: string; category: BlockCategory;
+  defaultParams: Record<string, unknown>;
+  hasInput: boolean; hasOutput: boolean;
+  description: string;
+}
+interface CustomCompositeDef {
+  nodes: Array<{ id: string; type: string; parameters?: Record<string, unknown> }>;
+  edges: Array<{ from: string; to: string }>;
+  inputNodeId: string;
+  outputNodeId: string;
+}
+
+const customTypeRegistry      = new Map<string, CustomTypeDef>();
+const customCompositeRegistry = new Map<string, CustomCompositeDef>();
+
+function getDefaultParams(type: string): Record<string, unknown> {
+  return BLOCK_DEFAULT_PARAMS[type] ?? customTypeRegistry.get(type)?.defaultParams ?? {};
+}
+
+function autoLayout(
+  specNodes: Array<{ id: string; type: string; parameters?: Record<string, unknown> }>,
+  specEdges: Array<{ from: string; to: string }>,
+): {
+  nodes: Array<{ id: string; type: string; x: number; y: number; parameters: Record<string, unknown> }>;
+  edges: Array<{ id: string; sourceId: string; targetId: string }>;
+} {
+  const nodeIds = new Set(specNodes.map(n => n.id));
+  const adj    = new Map<string, string[]>();
+  const inDeg  = new Map<string, number>();
+  for (const n of specNodes) { adj.set(n.id, []); inDeg.set(n.id, 0); }
+  for (const e of specEdges) {
+    if (!nodeIds.has(e.from) || !nodeIds.has(e.to)) continue;
+    adj.get(e.from)!.push(e.to);
+    inDeg.set(e.to, (inDeg.get(e.to) ?? 0) + 1);
+  }
+
+  // BFS rank assignment
+  const rank    = new Map<string, number>();
+  const visited = new Set<string>();
+  let layer = [...inDeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
+  let r = 0;
+  while (layer.length > 0) {
+    const next: string[] = [];
+    for (const id of layer) {
+      if (visited.has(id)) continue;
+      visited.add(id);
+      rank.set(id, r);
+      for (const nxt of adj.get(id) ?? []) {
+        inDeg.set(nxt, inDeg.get(nxt)! - 1);
+        if (inDeg.get(nxt) === 0) next.push(nxt);
+      }
+    }
+    layer = next; r++;
+  }
+  for (const n of specNodes) if (!rank.has(n.id)) rank.set(n.id, 0);
+
+  // Group by rank → assign positions
+  const byRank = new Map<number, string[]>();
+  for (const n of specNodes) {
+    const rr = rank.get(n.id) ?? 0;
+    if (!byRank.has(rr)) byRank.set(rr, []);
+    byRank.get(rr)!.push(n.id);
+  }
+
+  const COL_W = NODE_W + 60;   // horizontal spacing (for parallel branches)
+  const ROW_H = NODE_H + 50;   // vertical spacing between ranks
+  const PAD   = 60;
+
+  const posMap = new Map<string, { x: number; y: number }>();
+  for (const [rr, ids] of byRank.entries()) {
+    // Centre parallel nodes horizontally when a rank has multiple items
+    const totalW = ids.length * COL_W - (COL_W - NODE_W);
+    const startX = PAD - totalW / 2 + NODE_W / 2;
+    for (let i = 0; i < ids.length; i++) {
+      posMap.set(ids[i], {
+        x: startX + i * COL_W,
+        y: PAD + rr * ROW_H,
+      });
+    }
+  }
+
+  const nodes = specNodes.map(n => {
+    const comp = customCompositeRegistry.get(n.type);
+    if (comp) {
+      // Expand named composite into a Custom node with embedded sub-graph
+      return {
+        id: n.id, type: 'Custom',
+        x: posMap.get(n.id)?.x ?? 0, y: posMap.get(n.id)?.y ?? 0,
+        parameters: {},
+        composite: {
+          label: n.type,
+          nodes: comp.nodes.map((cn, i) => ({
+            id: cn.id, type: cn.type, x: 0, y: i * 104,
+            parameters: { ...getDefaultParams(cn.type), ...(cn.parameters ?? {}) },
+          })),
+          edges: comp.edges.map((ce, i) => ({ id: `ci${i}`, sourceId: ce.from, targetId: ce.to })),
+          inputNodeId: comp.inputNodeId,
+          outputNodeId: comp.outputNodeId,
+        },
+      };
+    }
+    return {
+      id: n.id, type: n.type,
+      x: posMap.get(n.id)?.x ?? 0, y: posMap.get(n.id)?.y ?? 0,
+      parameters: { ...getDefaultParams(n.type), ...(n.parameters ?? {}) },
+    };
+  });
+
+  let eCounter = 0;
+  const edges = specEdges
+    .filter(e => nodeIds.has(e.from) && nodeIds.has(e.to))
+    .map(e => ({ id: `ae${++eCounter}`, sourceId: e.from, targetId: e.to }));
+
+  return { nodes, edges };
+}
+
+// ── Resource: block-types://catalog ───────────────────────────────────────
+
+server.resource(
+  {
+    name: 'block-types-catalog',
+    uri: 'block-types://catalog',
+    title: 'Block Types Catalog',
+    description: 'All available ML block types with default parameters, categories, input/output rules, and descriptions. Read this before calling design-architecture or create-block-type.',
+  },
+  async () => object({
+    builtIn: BLOCK_CATALOG,
+    custom: Object.fromEntries(customTypeRegistry.entries()),
+    composites: Object.fromEntries(
+      [...customCompositeRegistry.entries()].map(([name, def]) => [name, {
+        ...def,
+        label: name,
+        category: 'composite',
+        hasInput: true,
+        hasOutput: true,
+        description: `User-defined composite block`,
+      }])
+    ),
+  })
+);
+
+// ── Resource: layer-builder://guide ───────────────────────────────────────
+
+server.resource(
+  {
+    name: 'layer-builder-guide',
+    uri: 'layer-builder://guide',
+    title: 'Layer Builder Guide',
+    description: 'How to define custom layers that integrate fully with the visual graph: editable parameters, connection ports, shape display, and code generation.',
+  },
+  async () => text(`# Layer Builder Integration Guide
+
+## Parameters (Properties Panel)
+
+Every key in \`defaultParams\` becomes an editable input row in the Properties Panel.
+
+| JS type of default value | UI control | Notes |
+|--------------------------|------------|-------|
+| \`number\`               | Number input | Step 1 (or 0.001 if < 1) |
+| \`boolean\`              | Text input ("true"/"false") | |
+| \`string\`               | Text input | |
+| \`number[]\` (array)     | JSON text input | e.g. shape: [1, 28, 28] |
+
+**Best practices:**
+- Use \`number\` defaults for all dimensional params (in_features, out_channels, etc.)
+- Use snake_case keys matching PyTorch convention (in_features, not inFeatures)
+- Keep param names short — they display as labels with limited width
+
+## Connection Ports
+
+\`hasInput\`: input port (top of block) — block can receive data from upstream
+\`hasOutput\`: output port (bottom of block) — block can send data downstream
+
+Guidelines:
+- \`hasInput: false\` → source/root nodes (Input, Tokenizer — no upstream)
+- \`hasInput: false, hasOutput: false\` → config nodes (optimizers, losses — not in data flow)
+- All other layers: \`hasInput: true, hasOutput: true\`
+
+## Categories & Colors
+
+| Category | Color | Use for |
+|----------|-------|---------|
+| \`core\` | Blue | Standard layers (Linear, Conv2D, etc.) |
+| \`activation\` | Purple | Activation functions (ReLU, GELU, etc.) |
+| \`structural\` | Green | Skip connections, concatenation |
+| \`training\` | Amber | Optimizer and loss config nodes |
+| \`composite\` | Gold | Multi-layer blocks (Transformer, ResNet, etc.) |
+
+## Shape Propagation (shapeEngine.ts)
+
+The visual graph automatically computes and displays output shapes, and highlights dimension mismatches.
+
+**Built-in types** have full shape rules (e.g. Linear changes last dim, Conv2D changes spatial dims).
+
+**Custom types defined via \`create-block-type\`** are treated as **passthrough** (outShape = inShape). This means no shape mismatch warnings but also no shape transformation display.
+
+To get accurate shape display for a new layer type, it must be added to \`shapeEngine.ts\` in the \`computeOutput()\` function. Provide the following to the user and ask them to add it:
+
+\`\`\`typescript
+case 'YourType': {
+  if (!inShape) return { outShape: null, conflict: null };
+  const o = v('out_features');       // read param
+  const out = [...inShape.slice(0, -1), o];  // compute new shape
+  const last = inShape[inShape.length - 1];
+  if (last !== v('in_features')) return { outShape: out, conflict: \`\${last} ≠ \${v('in_features')}\` };
+  return { outShape: out, conflict: null };
+}
+\`\`\`
+
+## Composite Blocks (create-custom-block)
+
+Composite blocks group existing layers into a reusable named type. They render with:
+- Gold/amber color (composite category)
+- Internal layer flow shown in the Properties Panel (topological order)
+- Detailed sub-graph view on double-click (CompositeDetailModal)
+
+The \`inputNodeId\` and \`outputNodeId\` define which internal nodes connect to external edges.
+
+## PyTorch Code Generation
+
+Custom types defined via \`create-block-type\` generate as commented placeholders:
+\`\`\`python
+# TODO: YourType(param1=value1, param2=value2)  — not yet implemented
+\`\`\`
+
+Custom composite types generate as a call to a helper class that wraps the sub-graph.
+
+To get full code generation, a \`case 'YourType':\` must be added to the \`emitNode()\` function in \`index.ts\`.
+`)
+);
+
+// ── Tool: create-block-type ────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'create-block-type',
+    description: 'Define a new custom ML layer type that will appear in the visual graph. Parameters become editable fields in the Properties Panel. Use design-architecture afterward to place it in a schematic.',
+    schema: z.object({
+      type: z.string().describe("Unique type identifier, PascalCase (e.g. 'GroupNorm', 'GRUCell', 'SEBlock')"),
+      label: z.string().describe("Human-readable label shown on the block in the graph"),
+      category: z.enum(['core', 'activation', 'structural', 'training', 'composite']).describe("Category determines block color. core=blue, activation=purple, structural=green, training=amber, composite=gold"),
+      defaultParams: z.record(z.string(), z.unknown()).describe("Default parameter values. Each key becomes an editable field. Use numbers for dimensions, booleans for flags, arrays for shapes."),
+      hasInput: z.boolean().describe("Does this block receive data from upstream? False for source nodes (like Input, Tokenizer)."),
+      hasOutput: z.boolean().describe("Does this block produce output for downstream? False for config-only nodes (like optimizers)."),
+      description: z.string().optional().describe("Optional description for the catalog"),
+    }),
+    outputSchema: z.object({ registered: z.boolean(), type: z.string() }),
+  },
+  async ({ type, label, category, defaultParams, hasInput, hasOutput, description }) => {
+    customTypeRegistry.set(type, { label, category, defaultParams, hasInput, hasOutput, description: description ?? '' });
+    return object({ registered: true, type });
+  }
+);
+
+// ── Tool: create-custom-block ──────────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'create-custom-block',
+    description: 'Define a named composite block type built from existing layer types. Once registered, use it in design-architecture by setting a node\'s type to this name.',
+    schema: z.object({
+      name: z.string().describe("Unique composite name, PascalCase (e.g. 'MyEncoder', 'VisionStem')"),
+      nodes: z.array(z.object({
+        id: z.string().describe("Internal node id"),
+        type: z.string().describe("Layer type (from block-types://catalog)"),
+        parameters: z.record(z.string(), z.unknown()).optional().describe("Parameter overrides"),
+      })).describe("Internal layers of this composite block"),
+      edges: z.array(z.object({
+        from: z.string().describe("Source internal node id"),
+        to:   z.string().describe("Target internal node id"),
+      })).describe("Internal connections"),
+      inputNodeId:  z.string().describe("ID of the internal node that receives external input"),
+      outputNodeId: z.string().describe("ID of the internal node that provides external output"),
+    }),
+    outputSchema: z.object({ registered: z.boolean(), name: z.string() }),
+  },
+  async ({ name, nodes, edges, inputNodeId, outputNodeId }) => {
+    customCompositeRegistry.set(name, { nodes, edges, inputNodeId, outputNodeId });
+    return object({ registered: true, name });
+  }
+);
+
+// ── Server-side in-memory design storage (latest save from widget) ─────────
+let savedDesign: z.infer<typeof graphSchema> | null = null;
+
+// ── Tool: design-architecture ──────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "design-architecture",
+    description: "Compute and stage a neural network architecture layout from layer/connection specs. Stores the result for render-model-builder. IMPORTANT: You MUST call render-model-builder immediately after this tool to display the visualization to the user.",
+    schema: z.object({
+      nodes: z.array(z.object({
+        id: z.string().describe("Unique node id, e.g. 'input', 'conv1', 'relu1'"),
+        type: z.string().describe("Block type — see block-types://catalog for the full list with parameters"),
+        parameters: z.record(z.string(), z.unknown()).optional().describe("Override default parameters"),
+      })).describe("Layers in the architecture"),
+      edges: z.array(z.object({
+        from: z.string().describe("Source node id"),
+        to:   z.string().describe("Target node id"),
+      })).describe("Connections between layers"),
+      title: z.string().optional().describe("Architecture name for display"),
+    }),
+    outputSchema: z.object({ staged: z.boolean(), nodeCount: z.number(), edgeCount: z.number(), nextStep: z.string() }),
+  },
+  async ({ nodes: specNodes, edges: specEdges, title }) => {
+    const layout = autoLayout(specNodes, specEdges);
+    designedLayout = layout;
+    return object({
+      staged: true,
+      nodeCount: layout.nodes.length,
+      edgeCount: layout.edges.length,
+      nextStep: `Architecture "${title ?? 'Untitled'}" staged with ${layout.nodes.length} layer${layout.nodes.length !== 1 ? 's' : ''} and ${layout.edges.length} connection${layout.edges.length !== 1 ? 's' : ''}. Call render-model-builder now to display it to the user.`,
+    });
+  }
+);
+
+// ── Tool: save-design ──────────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "save-design",
+    description: "Save the current architecture graph from the visual builder (called automatically by the widget on every change)",
+    schema: z.object({
+      graph: graphSchema.describe("Current architecture graph"),
+    }),
+    outputSchema: z.object({ saved: z.boolean() }),
+  },
+  async ({ graph }) => {
+    savedDesign = graph;
+    return object({ saved: true });
+  }
+);
+
+// ── Tool: get-current-design ───────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "get-current-design",
+    description: "Get the current architecture graph from the visual builder. Use this to read and then modify an existing design via design-architecture.",
+    schema: z.object({}),
+    outputSchema: z.object({
+      graph: graphSchema.nullable(),
+      message: z.string(),
+    }),
+  },
+  async () => {
+    if (!savedDesign) {
+      return object({ graph: null, message: "No design saved yet — open the builder first and add some blocks." });
+    }
+    return object({ graph: savedDesign, message: `Current design has ${savedDesign.nodes.length} nodes and ${savedDesign.edges.length} edges.` });
+  }
+);
+
+// ── Tool: set-block-code ───────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "set-block-code",
+    description:
+      "Set a custom Python forward-pass line for a specific block in the current design. " +
+      "Use {in} for the input tensor variable and {out} for the output. " +
+      "Example: '{out} = torch.sigmoid(self.fc({in})) + {in}'. " +
+      "Call rerender-builder afterward to show the updated visualization.",
+    schema: z.object({
+      nodeId: z.string().describe("ID of the node to update (from get-current-design)"),
+      code: z.string().optional().describe(
+        "Python forward-pass line. Use {in} for input var, {out} for output var. " +
+        "Omit to remove the override and restore auto-generated code."
+      ),
+    }),
+    outputSchema: z.object({ updated: z.boolean(), nodeId: z.string(), message: z.string() }),
+  },
+  async ({ nodeId, code }) => {
+    if (!savedDesign) {
+      return object({ updated: false, nodeId, message: "No saved design — open the builder first." });
+    }
+    const node = savedDesign.nodes.find(n => n.id === nodeId);
+    if (!node) {
+      return object({ updated: false, nodeId, message: `Node '${nodeId}' not found in saved design.` });
+    }
+    savedDesign = {
+      ...savedDesign,
+      nodes: savedDesign.nodes.map(n =>
+        n.id === nodeId ? { ...n, codeOverride: code } : n
+      ),
+    };
+    return object({
+      updated: true,
+      nodeId,
+      message: code
+        ? `Code override set on '${node.type}' (${nodeId}). Call rerender-builder to refresh the view.`
+        : `Code override cleared on '${node.type}' (${nodeId}). Auto-generated code restored.`,
+    });
+  }
+);
+
+// ── Tool: rerender-builder ─────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "rerender-builder",
+    description:
+      "Re-render the visual architecture builder with the current saved design. " +
+      "Call this after set-block-code or any other programmatic changes to refresh the visualization.",
+    schema: z.object({}),
+    widget: {
+      name: "ml-architecture-builder",
+      invoking: "Refreshing architecture…",
+      invoked: "Architecture refreshed",
+    },
+  },
+  async () => {
+    if (!savedDesign || savedDesign.nodes.length === 0) {
+      return widget({
+        props: {},
+        output: text("No saved design found — use render-model-builder to open the builder first."),
+      });
+    }
+
+    // Re-layout from saved spec (re-compute positions)
+    const specNodes = savedDesign.nodes.map(n => ({
+      id: n.id, type: n.type, parameters: n.parameters,
+    }));
+    const specEdges = savedDesign.edges.map(e => ({
+      from: e.sourceId, to: e.targetId,
+    }));
+    const layout = autoLayout(specNodes, specEdges);
+
+    // Carry forward codeOverride from savedDesign
+    const nodes = layout.nodes.map(ln => {
+      const saved = savedDesign!.nodes.find(sn => sn.id === ln.id);
+      return saved?.codeOverride ? { ...ln, codeOverride: saved.codeOverride } : ln;
+    });
+
+    const overrideCount = nodes.filter(n => (n as typeof n & { codeOverride?: string }).codeOverride).length;
+
+    return widget({
+      props: { initialNodes: nodes, initialEdges: layout.edges },
+      output: text(
+        `Architecture refreshed — ${nodes.length} layer${nodes.length !== 1 ? 's' : ''}` +
+        (overrideCount > 0 ? `, ${overrideCount} with custom code overrides` : '') + '.'
+      ),
+    });
+  }
+);
+
+// ── Prompt: architecture-workflow ─────────────────────────────────────────
+
+server.prompt(
+  {
+    name: "architecture-workflow",
+    description: "Canonical tool sequence for designing and displaying neural network architectures. Read this when a user asks to design, build, or modify a model.",
+  },
+  async () => text(`# ML Architecture Builder — Tool Workflow
+
+When a user asks to design, create, visualise, or modify a neural network, follow this sequence:
+
+## Step 1 — Explore available blocks (recommended)
+Read the resource \`block-types://catalog\` to see all layer types, their default parameters, categories, and descriptions.
+Read \`layer-builder://guide\` to understand how custom layer types integrate with the visual graph.
+
+## Step 2 — Register custom types (if needed)
+- \`create-block-type\` — define a new atomic layer type (name, params, category, connection rules)
+- \`create-custom-block\` — define a named composite from existing layers (sub-graph)
+
+## Step 3 — Design the architecture
+Call \`design-architecture\` with:
+- \`nodes\`: list of layers, each with an \`id\` and \`type\` (and optional \`parameters\` overrides)
+- \`edges\`: list of connections as \`{ from, to }\` pairs referencing node ids
+
+This computes the layout and stages it server-side. It does NOT show any visual yet.
+
+## Step 4 — ALWAYS render immediately after ⬅ critical
+Call \`render-model-builder\` with no arguments immediately after \`design-architecture\`.
+This is the step that actually displays the interactive visual builder to the user.
+**Do not skip this step. Do not ask the user before calling it.**
+
+## Step 5 — Iterative modifications
+To modify an existing design:
+1. \`get-current-design\` — read the current canvas state (nodes + edges)
+2. \`design-architecture\` — call with the updated spec
+3. \`render-model-builder\` — display the updated design
+
+## Step 6 — Generate code
+Call \`generate-pytorch-code\` with the graph from \`get-current-design\` to produce runnable PyTorch.
+
+---
+**Summary of the mandatory two-step render sequence:**
+\`design-architecture\` → stage layout → \`render-model-builder\` → show to user
+`)
+);
 
 // ── Start ──────────────────────────────────────────────────────────────────
 
