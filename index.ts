@@ -53,10 +53,13 @@ const graphSchema = z.object({
 
 // ── Tool: render-model-builder ─────────────────────────────────────────────
 
+// Staged layout from design-architecture, loaded on next render call
+let designedLayout: ReturnType<typeof autoLayout> | null = null;
+
 server.tool(
   {
     name: "render-model-builder",
-    description: "Open the visual ML architecture builder to design a neural network",
+    description: "Open the visual ML architecture builder. If design-architecture was called beforehand, the designed layout is preloaded. Otherwise opens a blank canvas for manual editing.",
     schema: z.object({}),
     widget: {
       name: "ml-architecture-builder",
@@ -65,12 +68,15 @@ server.tool(
     },
   },
   async () => {
+    const layout = designedLayout;
+    designedLayout = null; // consume — next blank call gets empty canvas
+    const hasDesign = layout !== null && layout.nodes.length > 0;
     return widget({
-      props: {},
+      props: hasDesign ? { initialNodes: layout!.nodes, initialEdges: layout!.edges } : {},
       output: text(
-        "ML Architecture Builder is ready. " +
-        "Drag blocks from the left panel onto the canvas, connect them by dragging from output ports (bottom) to input ports (top), " +
-        "then click 'Generate Model' to produce PyTorch code."
+        hasDesign
+          ? `Architecture loaded with ${layout!.nodes.length} layer${layout!.nodes.length !== 1 ? 's' : ''} and ${layout!.edges.length} connection${layout!.edges.length !== 1 ? 's' : ''}. Use the visual builder to inspect or edit it.`
+          : "ML Architecture Builder is ready. Drag blocks from the left panel onto the canvas, connect them by dragging between ports, then click 'Generate Model' to produce PyTorch code."
       ),
     });
   }
@@ -919,34 +925,29 @@ let savedDesign: z.infer<typeof graphSchema> | null = null;
 server.tool(
   {
     name: "design-architecture",
-    description: "Create and render a neural network architecture in the visual builder. Specify layers (nodes) and connections (edges); the builder opens with the design pre-loaded for the user to inspect and edit.",
+    description: "Compute and stage a neural network architecture layout from layer/connection specs. Stores the result for render-model-builder. IMPORTANT: You MUST call render-model-builder immediately after this tool to display the visualization to the user.",
     schema: z.object({
       nodes: z.array(z.object({
         id: z.string().describe("Unique node id, e.g. 'input', 'conv1', 'relu1'"),
-        type: z.string().describe("Block type: Input | Linear | Conv2D | Flatten | BatchNorm | Dropout | LayerNorm | MultiHeadAttn | Tokenizer | Embedding | SinePE | RoPE | LearnedPE | ReLU | GELU | Sigmoid | Tanh | Softmax | ResidualAdd | Concatenate | SGD | Adam | MSELoss | CrossEntropyLoss | TransformerBlock | ConvBNReLU | ResNetBlock | MLPBlock"),
+        type: z.string().describe("Block type — see block-types://catalog for the full list with parameters"),
         parameters: z.record(z.string(), z.unknown()).optional().describe("Override default parameters"),
       })).describe("Layers in the architecture"),
       edges: z.array(z.object({
         from: z.string().describe("Source node id"),
         to:   z.string().describe("Target node id"),
       })).describe("Connections between layers"),
-      title: z.string().optional().describe("Architecture name shown in the output message"),
+      title: z.string().optional().describe("Architecture name for display"),
     }),
-    widget: {
-      name: "ml-architecture-builder",
-      invoking: "Designing architecture…",
-      invoked: "Architecture ready",
-    },
+    outputSchema: z.object({ staged: z.boolean(), nodeCount: z.number(), edgeCount: z.number(), nextStep: z.string() }),
   },
   async ({ nodes: specNodes, edges: specEdges, title }) => {
-    const { nodes, edges } = autoLayout(specNodes, specEdges);
-    return widget({
-      props: { initialNodes: nodes, initialEdges: edges },
-      output: text(
-        `Architecture "${title ?? 'Untitled'}" loaded with ${nodes.length} layer${nodes.length !== 1 ? 's' : ''} ` +
-        `and ${edges.length} connection${edges.length !== 1 ? 's' : ''}. ` +
-        "Open the builder to inspect or edit it visually."
-      ),
+    const layout = autoLayout(specNodes, specEdges);
+    designedLayout = layout;
+    return object({
+      staged: true,
+      nodeCount: layout.nodes.length,
+      edgeCount: layout.edges.length,
+      nextStep: `Architecture "${title ?? 'Untitled'}" staged with ${layout.nodes.length} layer${layout.nodes.length !== 1 ? 's' : ''} and ${layout.edges.length} connection${layout.edges.length !== 1 ? 's' : ''}. Call render-model-builder now to display it to the user.`,
     });
   }
 );
@@ -986,6 +987,52 @@ server.tool(
     }
     return object({ graph: savedDesign, message: `Current design has ${savedDesign.nodes.length} nodes and ${savedDesign.edges.length} edges.` });
   }
+);
+
+// ── Prompt: architecture-workflow ─────────────────────────────────────────
+
+server.prompt(
+  {
+    name: "architecture-workflow",
+    description: "Canonical tool sequence for designing and displaying neural network architectures. Read this when a user asks to design, build, or modify a model.",
+  },
+  async () => text(`# ML Architecture Builder — Tool Workflow
+
+When a user asks to design, create, visualise, or modify a neural network, follow this sequence:
+
+## Step 1 — Explore available blocks (recommended)
+Read the resource \`block-types://catalog\` to see all layer types, their default parameters, categories, and descriptions.
+Read \`layer-builder://guide\` to understand how custom layer types integrate with the visual graph.
+
+## Step 2 — Register custom types (if needed)
+- \`create-block-type\` — define a new atomic layer type (name, params, category, connection rules)
+- \`create-custom-block\` — define a named composite from existing layers (sub-graph)
+
+## Step 3 — Design the architecture
+Call \`design-architecture\` with:
+- \`nodes\`: list of layers, each with an \`id\` and \`type\` (and optional \`parameters\` overrides)
+- \`edges\`: list of connections as \`{ from, to }\` pairs referencing node ids
+
+This computes the layout and stages it server-side. It does NOT show any visual yet.
+
+## Step 4 — ALWAYS render immediately after ⬅ critical
+Call \`render-model-builder\` with no arguments immediately after \`design-architecture\`.
+This is the step that actually displays the interactive visual builder to the user.
+**Do not skip this step. Do not ask the user before calling it.**
+
+## Step 5 — Iterative modifications
+To modify an existing design:
+1. \`get-current-design\` — read the current canvas state (nodes + edges)
+2. \`design-architecture\` — call with the updated spec
+3. \`render-model-builder\` — display the updated design
+
+## Step 6 — Generate code
+Call \`generate-pytorch-code\` with the graph from \`get-current-design\` to produce runnable PyTorch.
+
+---
+**Summary of the mandatory two-step render sequence:**
+\`design-architecture\` → stage layout → \`render-model-builder\` → show to user
+`)
 );
 
 // ── Start ──────────────────────────────────────────────────────────────────
