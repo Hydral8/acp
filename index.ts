@@ -552,6 +552,416 @@ def eval_step(batch_x, batch_y):
 `;
 }
 
+// ── design-architecture helpers ────────────────────────────────────────────
+
+const NODE_W = 140;
+const NODE_H = 64;
+
+type BlockCategory = 'core' | 'activation' | 'structural' | 'training' | 'composite';
+interface BlockTypeDef {
+  label: string; category: BlockCategory;
+  defaultParams: Record<string, unknown>;
+  hasInput: boolean; hasOutput: boolean;
+  description: string;
+}
+
+const BLOCK_CATALOG: Record<string, BlockTypeDef> = {
+  // ── Core Layers ──────────────────────────────────────────────────────────
+  Input:            { label: 'Input',          category: 'core', hasInput: false, hasOutput: true,  defaultParams: { shape: [1, 28, 28] },                                                              description: 'Source node. shape: output tensor dims (no batch dim)' },
+  Linear:           { label: 'Linear',         category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { in_features: 128, out_features: 64, bias: true },                                  description: 'Fully-connected y = xW^T + b. Transforms last dim in_features → out_features' },
+  Conv2D:           { label: 'Conv2D',         category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { in_channels: 1, out_channels: 32, kernel_size: 3, stride: 1, padding: 0 },         description: '2D convolution. Out spatial: floor((H+2P-K)/S+1)' },
+  Flatten:          { label: 'Flatten',        category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { start_dim: 1 },                                                                    description: 'Flatten from start_dim onward into one dimension' },
+  BatchNorm:        { label: 'BatchNorm',      category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { num_features: 64 },                                                                description: 'Batch normalization. num_features must match channel count' },
+  Dropout:          { label: 'Dropout',        category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { p: 0.5 },                                                                          description: 'Randomly zeros elements with probability p during training' },
+  LayerNorm:        { label: 'LayerNorm',      category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { normalized_shape: 512 },                                                           description: 'Layer normalization over last dim. normalized_shape must match last dim' },
+  MultiHeadAttn:    { label: 'MultiHead Attn', category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { embed_dim: 512, num_heads: 8 },                                                    description: 'Multi-head self-attention. embed_dim must match last dim and be divisible by num_heads' },
+  Tokenizer:        { label: 'Tokenizer',      category: 'core', hasInput: false, hasOutput: true,  defaultParams: { vocab_size: 30000, max_length: 512 },                                              description: 'Text tokenizer. Outputs integer token IDs with shape [max_length]' },
+  Embedding:        { label: 'Embedding',      category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { num_embeddings: 30000, embedding_dim: 512, padding_idx: 0 },                       description: 'Lookup table. Input: token IDs → Output: [..., embedding_dim]' },
+  SinePE:           { label: 'Sine PE',        category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { d_model: 512, max_len: 512, dropout: 0.1 },                                        description: 'Fixed sinusoidal positional encoding (Vaswani 2017). Passthrough shape' },
+  RoPE:             { label: 'RoPE',           category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { dim: 64, max_seq_len: 2048 },                                                      description: 'Rotary positional encoding (Su 2021, LLaMA-style). Passthrough shape' },
+  LearnedPE:        { label: 'Learned PE',     category: 'core', hasInput: true,  hasOutput: true,  defaultParams: { max_len: 512, d_model: 512 },                                                      description: 'BERT-style learned positional embeddings. Passthrough shape' },
+  // ── Activations ──────────────────────────────────────────────────────────
+  ReLU:             { label: 'ReLU',           category: 'activation', hasInput: true, hasOutput: true, defaultParams: {},           description: 'max(0,x). Passthrough shape' },
+  GELU:             { label: 'GELU',           category: 'activation', hasInput: true, hasOutput: true, defaultParams: {},           description: 'Gaussian Error Linear Unit. Common in transformers. Passthrough shape' },
+  Sigmoid:          { label: 'Sigmoid',        category: 'activation', hasInput: true, hasOutput: true, defaultParams: {},           description: 'σ(x) = 1/(1+e^-x). Output in (0,1). Passthrough shape' },
+  Tanh:             { label: 'Tanh',           category: 'activation', hasInput: true, hasOutput: true, defaultParams: {},           description: 'tanh(x). Output in (-1,1). Passthrough shape' },
+  Softmax:          { label: 'Softmax',        category: 'activation', hasInput: true, hasOutput: true, defaultParams: { dim: -1 }, description: 'Softmax over dim. Converts logits to probabilities. Passthrough shape' },
+  // ── Structural ───────────────────────────────────────────────────────────
+  ResidualAdd:      { label: 'Residual Add',   category: 'structural', hasInput: true, hasOutput: true, defaultParams: {},           description: 'Identity skip connection. Adds input to itself. Passthrough shape' },
+  Concatenate:      { label: 'Concatenate',    category: 'structural', hasInput: true, hasOutput: true, defaultParams: { dim: 1 },  description: 'Concatenate tensors along dim' },
+  // ── Training Config ──────────────────────────────────────────────────────
+  SGD:              { label: 'SGD Optimizer',     category: 'training', hasInput: false, hasOutput: false, defaultParams: { lr: 0.01, momentum: 0.9 }, description: 'SGD optimizer. Standalone config node (no data flow)' },
+  Adam:             { label: 'Adam Optimizer',    category: 'training', hasInput: false, hasOutput: false, defaultParams: { lr: 0.001 },              description: 'Adam optimizer. Standalone config node (no data flow)' },
+  MSELoss:          { label: 'MSE Loss',          category: 'training', hasInput: false, hasOutput: false, defaultParams: {},                          description: 'MSE loss for regression. Standalone config node' },
+  CrossEntropyLoss: { label: 'CrossEntropy Loss', category: 'training', hasInput: false, hasOutput: false, defaultParams: {},                          description: 'Cross-entropy loss + softmax for classification. Standalone config node' },
+  // ── Composite ────────────────────────────────────────────────────────────
+  TransformerBlock: { label: 'Transformer',   category: 'composite', hasInput: true, hasOutput: true, defaultParams: { d_model: 512, nhead: 8, dim_feedforward: 2048, dropout: 0.1 },                          description: 'Transformer encoder block: MultiHeadAttn + LayerNorm + FFN + LayerNorm' },
+  ConvBNReLU:       { label: 'Conv-BN-ReLU',  category: 'composite', hasInput: true, hasOutput: true, defaultParams: { in_channels: 3, out_channels: 64, kernel_size: 3, stride: 1, padding: 1 },             description: 'Conv2D → BatchNorm → ReLU fused block. Standard CNN building block' },
+  ResNetBlock:      { label: 'ResNet Block',   category: 'composite', hasInput: true, hasOutput: true, defaultParams: { channels: 64, stride: 1 },                                                              description: 'Residual block: two Conv-BN-ReLU layers with identity skip connection' },
+  MLPBlock:         { label: 'MLP Block',      category: 'composite', hasInput: true, hasOutput: true, defaultParams: { in_features: 512, hidden_features: 2048, out_features: 512, dropout: 0.0 },           description: 'Two-layer MLP: Linear → GELU → Dropout → Linear. Used in transformer FFN' },
+};
+
+// Derived default params lookup (used in auto-layout and shape engine fallback)
+const BLOCK_DEFAULT_PARAMS: Record<string, Record<string, unknown>> = Object.fromEntries(
+  Object.entries(BLOCK_CATALOG).map(([k, v]) => [k, v.defaultParams])
+);
+
+// ── Runtime custom type registries ─────────────────────────────────────────
+
+interface CustomTypeDef {
+  label: string; category: BlockCategory;
+  defaultParams: Record<string, unknown>;
+  hasInput: boolean; hasOutput: boolean;
+  description: string;
+}
+interface CustomCompositeDef {
+  nodes: Array<{ id: string; type: string; parameters?: Record<string, unknown> }>;
+  edges: Array<{ from: string; to: string }>;
+  inputNodeId: string;
+  outputNodeId: string;
+}
+
+const customTypeRegistry      = new Map<string, CustomTypeDef>();
+const customCompositeRegistry = new Map<string, CustomCompositeDef>();
+
+function getDefaultParams(type: string): Record<string, unknown> {
+  return BLOCK_DEFAULT_PARAMS[type] ?? customTypeRegistry.get(type)?.defaultParams ?? {};
+}
+
+function autoLayout(
+  specNodes: Array<{ id: string; type: string; parameters?: Record<string, unknown> }>,
+  specEdges: Array<{ from: string; to: string }>,
+): {
+  nodes: Array<{ id: string; type: string; x: number; y: number; parameters: Record<string, unknown> }>;
+  edges: Array<{ id: string; sourceId: string; targetId: string }>;
+} {
+  const nodeIds = new Set(specNodes.map(n => n.id));
+  const adj    = new Map<string, string[]>();
+  const inDeg  = new Map<string, number>();
+  for (const n of specNodes) { adj.set(n.id, []); inDeg.set(n.id, 0); }
+  for (const e of specEdges) {
+    if (!nodeIds.has(e.from) || !nodeIds.has(e.to)) continue;
+    adj.get(e.from)!.push(e.to);
+    inDeg.set(e.to, (inDeg.get(e.to) ?? 0) + 1);
+  }
+
+  // BFS rank assignment
+  const rank    = new Map<string, number>();
+  const visited = new Set<string>();
+  let layer = [...inDeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
+  let r = 0;
+  while (layer.length > 0) {
+    const next: string[] = [];
+    for (const id of layer) {
+      if (visited.has(id)) continue;
+      visited.add(id);
+      rank.set(id, r);
+      for (const nxt of adj.get(id) ?? []) {
+        inDeg.set(nxt, inDeg.get(nxt)! - 1);
+        if (inDeg.get(nxt) === 0) next.push(nxt);
+      }
+    }
+    layer = next; r++;
+  }
+  for (const n of specNodes) if (!rank.has(n.id)) rank.set(n.id, 0);
+
+  // Group by rank → assign positions
+  const byRank = new Map<number, string[]>();
+  for (const n of specNodes) {
+    const rr = rank.get(n.id) ?? 0;
+    if (!byRank.has(rr)) byRank.set(rr, []);
+    byRank.get(rr)!.push(n.id);
+  }
+
+  const COL_W = NODE_W + 80;
+  const ROW_H = NODE_H + 40;
+  const PAD   = 60;
+
+  const posMap = new Map<string, { x: number; y: number }>();
+  for (const [rr, ids] of byRank.entries()) {
+    for (let i = 0; i < ids.length; i++) {
+      posMap.set(ids[i], { x: PAD + rr * COL_W, y: PAD + i * ROW_H });
+    }
+  }
+
+  const nodes = specNodes.map(n => {
+    const comp = customCompositeRegistry.get(n.type);
+    if (comp) {
+      // Expand named composite into a Custom node with embedded sub-graph
+      return {
+        id: n.id, type: 'Custom',
+        x: posMap.get(n.id)?.x ?? 0, y: posMap.get(n.id)?.y ?? 0,
+        parameters: {},
+        composite: {
+          label: n.type,
+          nodes: comp.nodes.map((cn, i) => ({
+            id: cn.id, type: cn.type, x: 0, y: i * 104,
+            parameters: { ...getDefaultParams(cn.type), ...(cn.parameters ?? {}) },
+          })),
+          edges: comp.edges.map((ce, i) => ({ id: `ci${i}`, sourceId: ce.from, targetId: ce.to })),
+          inputNodeId: comp.inputNodeId,
+          outputNodeId: comp.outputNodeId,
+        },
+      };
+    }
+    return {
+      id: n.id, type: n.type,
+      x: posMap.get(n.id)?.x ?? 0, y: posMap.get(n.id)?.y ?? 0,
+      parameters: { ...getDefaultParams(n.type), ...(n.parameters ?? {}) },
+    };
+  });
+
+  let eCounter = 0;
+  const edges = specEdges
+    .filter(e => nodeIds.has(e.from) && nodeIds.has(e.to))
+    .map(e => ({ id: `ae${++eCounter}`, sourceId: e.from, targetId: e.to }));
+
+  return { nodes, edges };
+}
+
+// ── Resource: block-types://catalog ───────────────────────────────────────
+
+server.resource(
+  {
+    name: 'block-types-catalog',
+    uri: 'block-types://catalog',
+    title: 'Block Types Catalog',
+    description: 'All available ML block types with default parameters, categories, input/output rules, and descriptions. Read this before calling design-architecture or create-block-type.',
+  },
+  async () => object({
+    builtIn: BLOCK_CATALOG,
+    custom: Object.fromEntries(customTypeRegistry.entries()),
+    composites: Object.fromEntries(
+      [...customCompositeRegistry.entries()].map(([name, def]) => [name, {
+        ...def,
+        label: name,
+        category: 'composite',
+        hasInput: true,
+        hasOutput: true,
+        description: `User-defined composite block`,
+      }])
+    ),
+  })
+);
+
+// ── Resource: layer-builder://guide ───────────────────────────────────────
+
+server.resource(
+  {
+    name: 'layer-builder-guide',
+    uri: 'layer-builder://guide',
+    title: 'Layer Builder Guide',
+    description: 'How to define custom layers that integrate fully with the visual graph: editable parameters, connection ports, shape display, and code generation.',
+  },
+  async () => text(`# Layer Builder Integration Guide
+
+## Parameters (Properties Panel)
+
+Every key in \`defaultParams\` becomes an editable input row in the Properties Panel.
+
+| JS type of default value | UI control | Notes |
+|--------------------------|------------|-------|
+| \`number\`               | Number input | Step 1 (or 0.001 if < 1) |
+| \`boolean\`              | Text input ("true"/"false") | |
+| \`string\`               | Text input | |
+| \`number[]\` (array)     | JSON text input | e.g. shape: [1, 28, 28] |
+
+**Best practices:**
+- Use \`number\` defaults for all dimensional params (in_features, out_channels, etc.)
+- Use snake_case keys matching PyTorch convention (in_features, not inFeatures)
+- Keep param names short — they display as labels with limited width
+
+## Connection Ports
+
+\`hasInput\`: input port (top of block) — block can receive data from upstream
+\`hasOutput\`: output port (bottom of block) — block can send data downstream
+
+Guidelines:
+- \`hasInput: false\` → source/root nodes (Input, Tokenizer — no upstream)
+- \`hasInput: false, hasOutput: false\` → config nodes (optimizers, losses — not in data flow)
+- All other layers: \`hasInput: true, hasOutput: true\`
+
+## Categories & Colors
+
+| Category | Color | Use for |
+|----------|-------|---------|
+| \`core\` | Blue | Standard layers (Linear, Conv2D, etc.) |
+| \`activation\` | Purple | Activation functions (ReLU, GELU, etc.) |
+| \`structural\` | Green | Skip connections, concatenation |
+| \`training\` | Amber | Optimizer and loss config nodes |
+| \`composite\` | Gold | Multi-layer blocks (Transformer, ResNet, etc.) |
+
+## Shape Propagation (shapeEngine.ts)
+
+The visual graph automatically computes and displays output shapes, and highlights dimension mismatches.
+
+**Built-in types** have full shape rules (e.g. Linear changes last dim, Conv2D changes spatial dims).
+
+**Custom types defined via \`create-block-type\`** are treated as **passthrough** (outShape = inShape). This means no shape mismatch warnings but also no shape transformation display.
+
+To get accurate shape display for a new layer type, it must be added to \`shapeEngine.ts\` in the \`computeOutput()\` function. Provide the following to the user and ask them to add it:
+
+\`\`\`typescript
+case 'YourType': {
+  if (!inShape) return { outShape: null, conflict: null };
+  const o = v('out_features');       // read param
+  const out = [...inShape.slice(0, -1), o];  // compute new shape
+  const last = inShape[inShape.length - 1];
+  if (last !== v('in_features')) return { outShape: out, conflict: \`\${last} ≠ \${v('in_features')}\` };
+  return { outShape: out, conflict: null };
+}
+\`\`\`
+
+## Composite Blocks (create-custom-block)
+
+Composite blocks group existing layers into a reusable named type. They render with:
+- Gold/amber color (composite category)
+- Internal layer flow shown in the Properties Panel (topological order)
+- Detailed sub-graph view on double-click (CompositeDetailModal)
+
+The \`inputNodeId\` and \`outputNodeId\` define which internal nodes connect to external edges.
+
+## PyTorch Code Generation
+
+Custom types defined via \`create-block-type\` generate as commented placeholders:
+\`\`\`python
+# TODO: YourType(param1=value1, param2=value2)  — not yet implemented
+\`\`\`
+
+Custom composite types generate as a call to a helper class that wraps the sub-graph.
+
+To get full code generation, a \`case 'YourType':\` must be added to the \`emitNode()\` function in \`index.ts\`.
+`)
+);
+
+// ── Tool: create-block-type ────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'create-block-type',
+    description: 'Define a new custom ML layer type that will appear in the visual graph. Parameters become editable fields in the Properties Panel. Use design-architecture afterward to place it in a schematic.',
+    schema: z.object({
+      type: z.string().describe("Unique type identifier, PascalCase (e.g. 'GroupNorm', 'GRUCell', 'SEBlock')"),
+      label: z.string().describe("Human-readable label shown on the block in the graph"),
+      category: z.enum(['core', 'activation', 'structural', 'training', 'composite']).describe("Category determines block color. core=blue, activation=purple, structural=green, training=amber, composite=gold"),
+      defaultParams: z.record(z.string(), z.unknown()).describe("Default parameter values. Each key becomes an editable field. Use numbers for dimensions, booleans for flags, arrays for shapes."),
+      hasInput: z.boolean().describe("Does this block receive data from upstream? False for source nodes (like Input, Tokenizer)."),
+      hasOutput: z.boolean().describe("Does this block produce output for downstream? False for config-only nodes (like optimizers)."),
+      description: z.string().optional().describe("Optional description for the catalog"),
+    }),
+    outputSchema: z.object({ registered: z.boolean(), type: z.string() }),
+  },
+  async ({ type, label, category, defaultParams, hasInput, hasOutput, description }) => {
+    customTypeRegistry.set(type, { label, category, defaultParams, hasInput, hasOutput, description: description ?? '' });
+    return object({ registered: true, type });
+  }
+);
+
+// ── Tool: create-custom-block ──────────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'create-custom-block',
+    description: 'Define a named composite block type built from existing layer types. Once registered, use it in design-architecture by setting a node\'s type to this name.',
+    schema: z.object({
+      name: z.string().describe("Unique composite name, PascalCase (e.g. 'MyEncoder', 'VisionStem')"),
+      nodes: z.array(z.object({
+        id: z.string().describe("Internal node id"),
+        type: z.string().describe("Layer type (from block-types://catalog)"),
+        parameters: z.record(z.string(), z.unknown()).optional().describe("Parameter overrides"),
+      })).describe("Internal layers of this composite block"),
+      edges: z.array(z.object({
+        from: z.string().describe("Source internal node id"),
+        to:   z.string().describe("Target internal node id"),
+      })).describe("Internal connections"),
+      inputNodeId:  z.string().describe("ID of the internal node that receives external input"),
+      outputNodeId: z.string().describe("ID of the internal node that provides external output"),
+    }),
+    outputSchema: z.object({ registered: z.boolean(), name: z.string() }),
+  },
+  async ({ name, nodes, edges, inputNodeId, outputNodeId }) => {
+    customCompositeRegistry.set(name, { nodes, edges, inputNodeId, outputNodeId });
+    return object({ registered: true, name });
+  }
+);
+
+// ── Server-side in-memory design storage (latest save from widget) ─────────
+let savedDesign: z.infer<typeof graphSchema> | null = null;
+
+// ── Tool: design-architecture ──────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "design-architecture",
+    description: "Create and render a neural network architecture in the visual builder. Specify layers (nodes) and connections (edges); the builder opens with the design pre-loaded for the user to inspect and edit.",
+    schema: z.object({
+      nodes: z.array(z.object({
+        id: z.string().describe("Unique node id, e.g. 'input', 'conv1', 'relu1'"),
+        type: z.string().describe("Block type: Input | Linear | Conv2D | Flatten | BatchNorm | Dropout | LayerNorm | MultiHeadAttn | Tokenizer | Embedding | SinePE | RoPE | LearnedPE | ReLU | GELU | Sigmoid | Tanh | Softmax | ResidualAdd | Concatenate | SGD | Adam | MSELoss | CrossEntropyLoss | TransformerBlock | ConvBNReLU | ResNetBlock | MLPBlock"),
+        parameters: z.record(z.string(), z.unknown()).optional().describe("Override default parameters"),
+      })).describe("Layers in the architecture"),
+      edges: z.array(z.object({
+        from: z.string().describe("Source node id"),
+        to:   z.string().describe("Target node id"),
+      })).describe("Connections between layers"),
+      title: z.string().optional().describe("Architecture name shown in the output message"),
+    }),
+    widget: {
+      name: "ml-architecture-builder",
+      invoking: "Designing architecture…",
+      invoked: "Architecture ready",
+    },
+  },
+  async ({ nodes: specNodes, edges: specEdges, title }) => {
+    const { nodes, edges } = autoLayout(specNodes, specEdges);
+    return widget({
+      props: { initialNodes: nodes, initialEdges: edges },
+      output: text(
+        `Architecture "${title ?? 'Untitled'}" loaded with ${nodes.length} layer${nodes.length !== 1 ? 's' : ''} ` +
+        `and ${edges.length} connection${edges.length !== 1 ? 's' : ''}. ` +
+        "Open the builder to inspect or edit it visually."
+      ),
+    });
+  }
+);
+
+// ── Tool: save-design ──────────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "save-design",
+    description: "Save the current architecture graph from the visual builder (called automatically by the widget on every change)",
+    schema: z.object({
+      graph: graphSchema.describe("Current architecture graph"),
+    }),
+    outputSchema: z.object({ saved: z.boolean() }),
+  },
+  async ({ graph }) => {
+    savedDesign = graph;
+    return object({ saved: true });
+  }
+);
+
+// ── Tool: get-current-design ───────────────────────────────────────────────
+
+server.tool(
+  {
+    name: "get-current-design",
+    description: "Get the current architecture graph from the visual builder. Use this to read and then modify an existing design via design-architecture.",
+    schema: z.object({}),
+    outputSchema: z.object({
+      graph: graphSchema.nullable(),
+      message: z.string(),
+    }),
+  },
+  async () => {
+    if (!savedDesign) {
+      return object({ graph: null, message: "No design saved yet — open the builder first and add some blocks." });
+    }
+    return object({ graph: savedDesign, message: `Current design has ${savedDesign.nodes.length} nodes and ${savedDesign.edges.length} edges.` });
+  }
+);
+
 // ── Start ──────────────────────────────────────────────────────────────────
 
 server.listen().then(() => console.log("ML Architecture Builder MCP server running"));

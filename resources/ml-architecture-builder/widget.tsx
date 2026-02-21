@@ -8,7 +8,38 @@ import { BlockLibrary } from './components/BlockLibrary';
 import { PropertiesPanel } from './components/PropertiesPanel';
 import { CompositeDetailModal } from './components/CompositeDetailModal';
 
-const propsSchema = z.object({});
+const designEdgeSchema = z.object({
+  id: z.string(),
+  sourceId: z.string(),
+  targetId: z.string(),
+});
+
+const designInnerNodeSchema = z.object({
+  id: z.string(), type: z.string(), x: z.number(), y: z.number(),
+  parameters: z.record(z.string(), z.unknown()),
+});
+
+const designCompositeSchema = z.object({
+  label: z.string(),
+  nodes: z.array(designInnerNodeSchema),
+  edges: z.array(designEdgeSchema),
+  inputNodeId: z.string(),
+  outputNodeId: z.string(),
+}).optional();
+
+const designNodeSchema = z.object({
+  id: z.string(),
+  type: z.string(),
+  x: z.number(),
+  y: z.number(),
+  parameters: z.record(z.string(), z.unknown()),
+  composite: designCompositeSchema,
+});
+
+const propsSchema = z.object({
+  initialNodes: z.array(designNodeSchema).optional(),
+  initialEdges: z.array(designEdgeSchema).optional(),
+});
 type Props = z.infer<typeof propsSchema>;
 
 export const widgetMetadata: WidgetMetadata = {
@@ -27,8 +58,11 @@ const newNodeId = () => `n${++_nodeCounter}`;
 const newEdgeId = () => `e${++_edgeCounter}`;
 
 export default function MLArchitectureBuilder() {
-  const { isPending } = useWidget<Props>();
+  const { isPending, props } = useWidget<Props>();
   const { callToolAsync: callGenerate, isPending: isGenerating } = useCallTool('generate-pytorch-code');
+  const { callToolAsync: callSave } = useCallTool('save-design');
+  const callSaveRef = useRef(callSave);
+  callSaveRef.current = callSave;
 
   const [nodes, setNodes] = useState<GraphNode[]>([]);
   const [edges, setEdges] = useState<GraphEdge[]>([]);
@@ -42,6 +76,8 @@ export default function MLArchitectureBuilder() {
   const [detailNode, setDetailNode] = useState<GraphNode | null>(null);
   const [customBlocks, setCustomBlocks] = useState<CompositeBlock[]>([]);
   const codeRef = useRef<HTMLPreElement>(null);
+  const initDoneRef = useRef(false);
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Graph mutations ──────────────────────────────────────────────────────
 
@@ -112,6 +148,41 @@ export default function MLArchitectureBuilder() {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
+
+  // ── Initialize from props (design-architecture preload) ───────────────────
+
+  useEffect(() => {
+    if (isPending || initDoneRef.current) return;
+    initDoneRef.current = true;
+    if (props?.initialNodes?.length) setNodes(props.initialNodes as GraphNode[]);
+    if (props?.initialEdges?.length) setEdges(props.initialEdges as GraphEdge[]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isPending]);
+
+  // ── Auto-save current design to server (for get-current-design) ───────────
+
+  useEffect(() => {
+    if (!initDoneRef.current) return;
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(() => {
+      const graph = {
+        nodes: nodes.map(n => ({
+          id: n.id, type: n.type, parameters: n.parameters,
+          composite: n.composite ? {
+            label: n.composite.label,
+            nodes: n.composite.nodes.map(cn => ({ id: cn.id, type: cn.type, parameters: cn.parameters })),
+            edges: n.composite.edges.map(ce => ({ id: ce.id, sourceId: ce.sourceId, targetId: ce.targetId })),
+            inputNodeId: n.composite.inputNodeId,
+            outputNodeId: n.composite.outputNodeId,
+          } : undefined,
+        })),
+        edges: edges.map(e => ({ id: e.id, sourceId: e.sourceId, targetId: e.targetId })),
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      callSaveRef.current({ graph } as any).catch(() => {});
+    }, 1500);
+    return () => { if (saveTimerRef.current) clearTimeout(saveTimerRef.current); };
+  }, [nodes, edges]);
 
   const updateParam = useCallback((nodeId: string, key: string, value: unknown) => {
     setNodes(prev => prev.map(n =>
