@@ -1,13 +1,27 @@
 import { GraphNode, GraphEdge, BLOCK_DEFS, CATEGORY_COLORS } from '../types';
 
+function topoSort(nodes: GraphNode[], edges: GraphEdge[]): GraphNode[] {
+  const adj = new Map<string, string[]>();
+  const inDeg = new Map<string, number>();
+  for (const n of nodes) { adj.set(n.id, []); inDeg.set(n.id, 0); }
+  for (const e of edges) { adj.get(e.sourceId)?.push(e.targetId); inDeg.set(e.targetId, (inDeg.get(e.targetId) ?? 0) + 1); }
+  const queue = [...inDeg.entries()].filter(([, d]) => d === 0).map(([id]) => id);
+  const sorted: string[] = [];
+  while (queue.length > 0) {
+    const id = queue.shift()!; sorted.push(id);
+    for (const nxt of adj.get(id) ?? []) { inDeg.set(nxt, inDeg.get(nxt)! - 1); if (inDeg.get(nxt) === 0) queue.push(nxt); }
+  }
+  return sorted.map(id => nodes.find(n => n.id === id)!).filter(Boolean);
+}
+
 interface Props {
-  selectedNode: GraphNode | null;
+  selectedNodes: GraphNode[];
   edges: GraphEdge[];
   onParamChange: (nodeId: string, key: string, value: unknown) => void;
   onDeleteNode: (nodeId: string) => void;
 }
 
-export function PropertiesPanel({ selectedNode, edges, onParamChange, onDeleteNode }: Props) {
+export function PropertiesPanel({ selectedNodes, edges, onParamChange, onDeleteNode }: Props) {
   const panelStyle: React.CSSProperties = {
     width: 216,
     minWidth: 216,
@@ -18,20 +32,25 @@ export function PropertiesPanel({ selectedNode, edges, onParamChange, onDeleteNo
     flexDirection: 'column',
   };
 
-  if (!selectedNode) {
+  const header = (
+    <div style={{
+      padding: '10px 12px 6px',
+      fontSize: 9,
+      letterSpacing: 1.5,
+      color: '#3a3a3a',
+      textTransform: 'uppercase',
+      fontWeight: 700,
+      borderBottom: '1px solid #111',
+    }}>
+      Properties
+    </div>
+  );
+
+  // ── No selection ─────────────────────────────────────────────────────────
+  if (selectedNodes.length === 0) {
     return (
       <div style={panelStyle}>
-        <div style={{
-          padding: '10px 12px 6px',
-          fontSize: 9,
-          letterSpacing: 1.5,
-          color: '#3a3a3a',
-          textTransform: 'uppercase',
-          fontWeight: 700,
-          borderBottom: '1px solid #111',
-        }}>
-          Properties
-        </div>
+        {header}
         <div style={{
           flex: 1,
           display: 'flex',
@@ -54,26 +73,78 @@ export function PropertiesPanel({ selectedNode, edges, onParamChange, onDeleteNo
     );
   }
 
+  // ── Multi-select ─────────────────────────────────────────────────────────
+  if (selectedNodes.length > 1) {
+    return (
+      <div style={panelStyle}>
+        {header}
+        <div style={{ padding: 12 }}>
+          <div style={{
+            padding: '9px 11px',
+            backgroundColor: '#1a1200',
+            border: '1px solid #ca8a0440',
+            borderLeft: '3px solid #ca8a04',
+            borderRadius: 6,
+            marginBottom: 14,
+          }}>
+            <div style={{ fontSize: 12, color: '#fde68a', fontWeight: 700 }}>
+              {selectedNodes.length} blocks selected
+            </div>
+            <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>
+              Shift+click to add/remove · Group in toolbar
+            </div>
+          </div>
+
+          <div style={{
+            fontSize: 9, color: '#3a3a3a',
+            letterSpacing: 1.5, textTransform: 'uppercase',
+            fontWeight: 700, marginBottom: 8,
+          }}>
+            Selected
+          </div>
+
+          {selectedNodes.map(node => {
+            const def = BLOCK_DEFS.find(d => d.type === node.type);
+            const colors = CATEGORY_COLORS[def?.category ?? 'composite'];
+            const label = node.type === 'Custom'
+              ? (node.composite?.label ?? 'Custom Block')
+              : (def?.label ?? node.type);
+            return (
+              <div key={node.id} style={{
+                marginBottom: 6,
+                padding: '5px 8px',
+                backgroundColor: colors.bg,
+                border: `1px solid ${colors.border}40`,
+                borderLeft: `2px solid ${colors.border}`,
+                borderRadius: 4,
+                fontSize: 11,
+                color: colors.text,
+                fontWeight: 500,
+              }}>
+                {label}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
+  // ── Single selection ─────────────────────────────────────────────────────
+  const selectedNode = selectedNodes[0];
   const def = BLOCK_DEFS.find(d => d.type === selectedNode.type)!;
-  const colors = CATEGORY_COLORS[def.category];
+  const colors = CATEGORY_COLORS[def?.category ?? 'composite'];
   const connectionCount = edges.filter(
     e => e.sourceId === selectedNode.id || e.targetId === selectedNode.id
   ).length;
   const hasParams = Object.keys(selectedNode.parameters).length > 0;
+  const displayLabel = selectedNode.type === 'Custom'
+    ? (selectedNode.composite?.label ?? 'Custom Block')
+    : (def?.label ?? selectedNode.type);
 
   return (
     <div style={panelStyle}>
-      <div style={{
-        padding: '10px 12px 6px',
-        fontSize: 9,
-        letterSpacing: 1.5,
-        color: '#3a3a3a',
-        textTransform: 'uppercase',
-        fontWeight: 700,
-        borderBottom: '1px solid #111',
-      }}>
-        Properties
-      </div>
+      {header}
 
       <div style={{ padding: 12, flex: 1 }}>
         {/* Block header */}
@@ -85,11 +156,44 @@ export function PropertiesPanel({ selectedNode, edges, onParamChange, onDeleteNo
           borderRadius: 6,
           marginBottom: 14,
         }}>
-          <div style={{ fontSize: 12, color: colors.text, fontWeight: 700 }}>{def.label}</div>
+          <div style={{ fontSize: 12, color: colors.text, fontWeight: 700 }}>{displayLabel}</div>
           <div style={{ fontSize: 10, color: '#555', marginTop: 2 }}>
-            {def.category} · {connectionCount} connection{connectionCount !== 1 ? 's' : ''}
+            {def?.category ?? 'composite'} · {connectionCount} connection{connectionCount !== 1 ? 's' : ''}
           </div>
+          {selectedNode.type === 'Custom' && selectedNode.composite && (
+            <div style={{ fontSize: 10, color: '#888', marginTop: 4 }}>
+              {selectedNode.composite.nodes.length} internal layers · double-click to inspect
+            </div>
+          )}
         </div>
+
+        {/* Internal structure for Custom blocks */}
+        {selectedNode.type === 'Custom' && selectedNode.composite && (() => {
+          const comp = selectedNode.composite;
+          const sorted = topoSort(comp.nodes as GraphNode[], comp.edges as GraphEdge[]);
+          return (
+            <div style={{ marginBottom: 14 }}>
+              <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 700, marginBottom: 8 }}>
+                Internal Structure
+              </div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' }}>
+                {sorted.map((n, i) => {
+                  const d = BLOCK_DEFS.find(bd => bd.type === n.type);
+                  const c = CATEGORY_COLORS[d?.category ?? 'composite'];
+                  const lbl = n.type === 'Custom' ? (n.composite?.label ?? 'Custom') : (d?.label ?? n.type);
+                  return (
+                    <span key={n.id} style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+                      <span style={{ fontSize: 9, padding: '2px 6px', borderRadius: 3, backgroundColor: c.bg, border: `1px solid ${c.border}50`, color: c.text, fontWeight: 600, whiteSpace: 'nowrap' }}>
+                        {lbl}
+                      </span>
+                      {i < sorted.length - 1 && <span style={{ fontSize: 9, color: '#2a2a2a' }}>→</span>}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Parameters */}
         {hasParams && (
@@ -145,7 +249,7 @@ export function PropertiesPanel({ selectedNode, edges, onParamChange, onDeleteNo
                     boxSizing: 'border-box',
                     fontFamily: 'inherit',
                   }}
-                  onFocus={e => (e.target.style.borderColor = colors.border + '80')}
+                  onFocus={e => (e.target.style.borderColor = (colors.border ?? '#888') + '80')}
                   onBlur={e => (e.target.style.borderColor = '#202020')}
                 />
               </div>

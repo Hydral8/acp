@@ -1,10 +1,12 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { McpUseProvider, useWidget, useCallTool, type WidgetMetadata } from 'mcp-use/react';
 import { z } from 'zod';
-import { GraphNode, GraphEdge, BLOCK_DEFS, PendingConn, OPTIMIZER_TYPES, LOSS_TYPES } from './types';
+import { GraphNode, GraphEdge, CompositeBlock, BLOCK_DEFS, PendingConn, OPTIMIZER_TYPES, LOSS_TYPES, COMPOSITE_PREBUILT_TYPES } from './types';
+import { propagateShapes, type ShapeFix } from './shapeEngine';
 import { Canvas } from './components/Canvas';
 import { BlockLibrary } from './components/BlockLibrary';
 import { PropertiesPanel } from './components/PropertiesPanel';
+import { CompositeDetailModal } from './components/CompositeDetailModal';
 
 const propsSchema = z.object({});
 type Props = z.infer<typeof propsSchema>;
@@ -30,21 +32,26 @@ export default function MLArchitectureBuilder() {
 
   const [nodes, setNodes] = useState<GraphNode[]>([]);
   const [edges, setEdges] = useState<GraphEdge[]>([]);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [pendingConn, setPendingConn] = useState<PendingConn | null>(null);
   const [generatedCode, setGeneratedCode] = useState<string | null>(null);
   const [errors, setErrors] = useState<string[]>([]);
   const [copied, setCopied] = useState(false);
+  const [showGroupModal, setShowGroupModal] = useState(false);
+  const [groupName, setGroupName] = useState('');
+  const [detailNode, setDetailNode] = useState<GraphNode | null>(null);
+  const [customBlocks, setCustomBlocks] = useState<CompositeBlock[]>([]);
   const codeRef = useRef<HTMLPreElement>(null);
 
   // ── Graph mutations ──────────────────────────────────────────────────────
 
-  const addNode = useCallback((type: string, x: number, y: number) => {
-    const def = BLOCK_DEFS.find(d => d.type === type)!;
-    setNodes(prev => [...prev, {
-      id: newNodeId(), type, x, y,
-      parameters: { ...def.defaultParams },
-    }]);
+  const addNode = useCallback((type: string, x: number, y: number, composite?: CompositeBlock) => {
+    if (type === 'Custom' && composite) {
+      setNodes(prev => [...prev, { id: newNodeId(), type: 'Custom', x, y, parameters: {}, composite }]);
+      return;
+    }
+    const def = BLOCK_DEFS.find(d => d.type === type);
+    setNodes(prev => [...prev, { id: newNodeId(), type, x, y, parameters: { ...(def?.defaultParams ?? {}) } }]);
   }, []);
 
   const moveNode = useCallback((id: string, x: number, y: number) => {
@@ -65,31 +72,128 @@ export default function MLArchitectureBuilder() {
   const deleteNode = useCallback((id: string) => {
     setNodes(prev => prev.filter(n => n.id !== id));
     setEdges(prev => prev.filter(e => e.sourceId !== id && e.targetId !== id));
-    setSelectedNodeId(null);
+    setSelectedIds(prev => prev.filter(s => s !== id));
+  }, []);
+
+  const deleteSelected = useCallback(() => {
+    setNodes(prev => prev.filter(n => !selectedIds.includes(n.id)));
+    setEdges(prev => prev.filter(e => !selectedIds.includes(e.sourceId) && !selectedIds.includes(e.targetId)));
+    setSelectedIds([]);
+  }, [selectedIds]);
+
+  // ── Selection ─────────────────────────────────────────────────────────────
+
+  const handleSelectNode = useCallback((id: string, addToSelection: boolean) => {
+    setSelectedIds(prev => {
+      if (addToSelection) {
+        return prev.includes(id) ? prev.filter(s => s !== id) : [...prev, id];
+      }
+      return [id];
+    });
+  }, []);
+
+  const handleClearSelection = useCallback(() => {
+    setSelectedIds([]);
   }, []);
 
   // ── Delete key ───────────────────────────────────────────────────────────
 
-  // Use a ref so the effect closure always sees the latest selectedNodeId
-  const selectedNodeIdRef = useRef(selectedNodeId);
-  selectedNodeIdRef.current = selectedNodeId;
+  const selectedIdsRef = useRef(selectedIds);
+  selectedIdsRef.current = selectedIds;
+  const deleteSelectedRef = useRef(deleteSelected);
+  deleteSelectedRef.current = deleteSelected;
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Delete' && e.key !== 'Backspace') return;
-      if ((e.target as HTMLElement)?.tagName === 'INPUT') return; // don't fire while editing params
-      const id = selectedNodeIdRef.current;
-      if (id) deleteNode(id);
+      if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
+      if (selectedIdsRef.current.length > 0) deleteSelectedRef.current();
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [deleteNode]);
+  }, []);
 
   const updateParam = useCallback((nodeId: string, key: string, value: unknown) => {
     setNodes(prev => prev.map(n =>
       n.id === nodeId ? { ...n, parameters: { ...n.parameters, [key]: value } } : n
     ));
   }, []);
+
+  // ── Shape propagation ──────────────────────────────────────────────────────
+
+  const shapeMap = useMemo(() => propagateShapes(nodes, edges), [nodes, edges]);
+
+  const handleFixConflict = useCallback((fix: ShapeFix) => {
+    updateParam(fix.nodeId, fix.key, fix.value);
+  }, [updateParam]);
+
+  // ── Group selection into composite block ──────────────────────────────────
+
+  const groupSelection = useCallback((label: string) => {
+    if (selectedIds.length < 2) return;
+
+    const selectedSet = new Set(selectedIds);
+    const selNodes = nodes.filter(n => selectedSet.has(n.id));
+
+    // Internal edges: both endpoints selected
+    const internalEdges = edges.filter(
+      e => selectedSet.has(e.sourceId) && selectedSet.has(e.targetId)
+    );
+    // External edges: exactly one endpoint is selected
+    const externalEdges = edges.filter(
+      e => (selectedSet.has(e.sourceId) !== selectedSet.has(e.targetId))
+    );
+
+    // Input node: first selected node that receives from outside
+    const inputNode = selNodes.find(n =>
+      externalEdges.some(e => e.targetId === n.id && !selectedSet.has(e.sourceId))
+    ) ?? selNodes[0];
+
+    // Output node: first selected node that sends to outside
+    const outputNode = selNodes.find(n =>
+      externalEdges.some(e => e.sourceId === n.id && !selectedSet.has(e.targetId))
+    ) ?? selNodes[selNodes.length - 1];
+
+    // Centroid position
+    const cx = selNodes.reduce((s, n) => s + n.x, 0) / selNodes.length;
+    const cy = selNodes.reduce((s, n) => s + n.y, 0) / selNodes.length;
+
+    const compositeId = newNodeId();
+    const compositeNode: GraphNode = {
+      id: compositeId,
+      type: 'Custom',
+      x: cx,
+      y: cy,
+      parameters: {},
+      composite: {
+        label,
+        nodes: selNodes,
+        edges: internalEdges,
+        inputNodeId: inputNode.id,
+        outputNodeId: outputNode.id,
+      },
+    };
+
+    // Redirect external edges: change selected-endpoint to compositeId
+    const redirectedEdges: GraphEdge[] = externalEdges.map(e => ({
+      ...e,
+      id: newEdgeId(),
+      sourceId: selectedSet.has(e.sourceId) ? compositeId : e.sourceId,
+      targetId: selectedSet.has(e.targetId) ? compositeId : e.targetId,
+    }));
+
+    setNodes(prev => [
+      ...prev.filter(n => !selectedSet.has(n.id)),
+      compositeNode,
+    ]);
+    setEdges(prev => [
+      ...prev.filter(e => !selectedSet.has(e.sourceId) && !selectedSet.has(e.targetId)),
+      ...redirectedEdges,
+    ]);
+    setSelectedIds([compositeId]);
+    // Register in library for reuse
+    if (compositeNode.composite) setCustomBlocks(prev => [...prev, compositeNode.composite!]);
+  }, [selectedIds, nodes, edges]);
 
   // ── Generate ─────────────────────────────────────────────────────────────
 
@@ -104,7 +208,16 @@ export default function MLArchitectureBuilder() {
     setErrors([]);
 
     const graph = {
-      nodes: nodes.map(n => ({ id: n.id, type: n.type, parameters: n.parameters })),
+      nodes: nodes.map(n => ({
+        id: n.id, type: n.type, parameters: n.parameters,
+        composite: n.composite ? {
+          label: n.composite.label,
+          nodes: n.composite.nodes.map(cn => ({ id: cn.id, type: cn.type, parameters: cn.parameters })),
+          edges: n.composite.edges.map(ce => ({ id: ce.id, sourceId: ce.sourceId, targetId: ce.targetId })),
+          inputNodeId: n.composite.inputNodeId,
+          outputNodeId: n.composite.outputNodeId,
+        } : undefined,
+      })),
       edges: edges.map(e => ({ id: e.id, sourceId: e.sourceId, targetId: e.targetId })),
     };
     try {
@@ -125,11 +238,25 @@ export default function MLArchitectureBuilder() {
     });
   }, [generatedCode]);
 
+  // ── Composite detail + custom library ────────────────────────────────────
+
+  const handleDoubleClickNode = useCallback((nodeId: string) => {
+    const n = nodes.find(nd => nd.id === nodeId);
+    if (n && (n.type === 'Custom' || COMPOSITE_PREBUILT_TYPES.has(n.type)) && n.composite) {
+      setDetailNode(n);
+    }
+  }, [nodes]);
+
+  const removeCustomBlock = useCallback((idx: number) => {
+    setCustomBlocks(prev => prev.filter((_, i) => i !== idx));
+  }, []);
+
   // ── Derived values ────────────────────────────────────────────────────────
 
-  const selectedNode = nodes.find(n => n.id === selectedNodeId) ?? null;
+  const selectedNodes = nodes.filter(n => selectedIds.includes(n.id));
   const optimizerNode = nodes.find(n => OPTIMIZER_TYPES.has(n.type)) ?? null;
   const lossNode = nodes.find(n => LOSS_TYPES.has(n.type)) ?? null;
+  const canGroup = selectedIds.length >= 2;
 
   if (isPending) {
     return (
@@ -188,6 +315,26 @@ export default function MLArchitectureBuilder() {
 
           <div style={{ flex: 1 }} />
 
+          {/* Group button — visible when 2+ blocks selected */}
+          {canGroup && (
+            <button
+              onClick={() => { setGroupName(''); setShowGroupModal(true); }}
+              style={{
+                padding: '5px 12px',
+                backgroundColor: '#1a1200',
+                border: '1px solid #ca8a04',
+                borderRadius: 5,
+                color: '#fde68a',
+                cursor: 'pointer',
+                fontSize: 11,
+                fontWeight: 600,
+                letterSpacing: 0.3,
+              }}
+            >
+              Group {selectedIds.length} blocks
+            </button>
+          )}
+
           {/* Optimizer badge */}
           <StatusBadge label={optimizerNode ? optimizerNode.type : 'No Optimizer'} active={!!optimizerNode} />
           <StatusBadge label={lossNode ? lossNode.type : 'No Loss'} active={!!lossNode} />
@@ -241,28 +388,130 @@ export default function MLArchitectureBuilder() {
 
         {/* ── Main body ───────────────────────────────────────────────────── */}
         <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
-          <BlockLibrary />
+          <BlockLibrary
+            customBlocks={customBlocks}
+            onRemoveCustomBlock={removeCustomBlock}
+          />
 
           <Canvas
             nodes={nodes}
             edges={edges}
-            selectedNodeId={selectedNodeId}
+            selectedIds={selectedIds}
             pendingConn={pendingConn}
+            shapeMap={shapeMap}
             onAddNode={addNode}
             onMoveNode={moveNode}
-            onSelectNode={setSelectedNodeId}
+            onSelectNode={handleSelectNode}
+            onClearSelection={handleClearSelection}
             onAddEdge={addEdge}
             onDeleteEdge={deleteEdge}
             onPendingConnChange={setPendingConn}
+            onFixConflict={handleFixConflict}
+            onDoubleClickNode={handleDoubleClickNode}
           />
 
           <PropertiesPanel
-            selectedNode={selectedNode}
+            selectedNodes={selectedNodes}
             edges={edges}
             onParamChange={updateParam}
             onDeleteNode={deleteNode}
           />
         </div>
+
+        {/* ── Composite detail modal (double-click) ──────────────────────── */}
+        {detailNode && (
+          <CompositeDetailModal node={detailNode} onClose={() => setDetailNode(null)} />
+        )}
+
+        {/* ── Group name modal ─────────────────────────────────────────────── */}
+        {showGroupModal && (
+          <div
+            onClick={e => { if (e.target === e.currentTarget) setShowGroupModal(false); }}
+            style={{
+              position: 'fixed', inset: 0,
+              backgroundColor: 'rgba(0,0,0,0.8)',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              zIndex: 200,
+            }}
+          >
+            <div style={{
+              backgroundColor: '#0d0d0d',
+              border: '1px solid #252525',
+              borderRadius: 10,
+              padding: 24,
+              width: 320,
+              boxShadow: '0 20px 60px rgba(0,0,0,0.8)',
+            }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: '#d0d0d0', marginBottom: 16 }}>
+                Name your composite block
+              </div>
+              <input
+                autoFocus
+                type="text"
+                value={groupName}
+                onChange={e => setGroupName(e.target.value)}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' && groupName.trim()) {
+                    groupSelection(groupName.trim());
+                    setShowGroupModal(false);
+                  }
+                  if (e.key === 'Escape') setShowGroupModal(false);
+                }}
+                placeholder="e.g. Encoder Block"
+                style={{
+                  width: '100%',
+                  padding: '8px 10px',
+                  backgroundColor: '#111',
+                  border: '1px solid #ca8a04',
+                  borderRadius: 5,
+                  color: '#fde68a',
+                  fontSize: 12,
+                  outline: 'none',
+                  boxSizing: 'border-box',
+                  fontFamily: 'inherit',
+                  marginBottom: 16,
+                }}
+              />
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end' }}>
+                <button
+                  onClick={() => setShowGroupModal(false)}
+                  style={{
+                    padding: '6px 14px',
+                    backgroundColor: 'transparent',
+                    border: '1px solid #333',
+                    borderRadius: 5,
+                    color: '#666',
+                    cursor: 'pointer',
+                    fontSize: 11,
+                  }}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={() => {
+                    if (groupName.trim()) {
+                      groupSelection(groupName.trim());
+                      setShowGroupModal(false);
+                    }
+                  }}
+                  disabled={!groupName.trim()}
+                  style={{
+                    padding: '6px 14px',
+                    backgroundColor: groupName.trim() ? '#1a1200' : '#111',
+                    border: `1px solid ${groupName.trim() ? '#ca8a04' : '#333'}`,
+                    borderRadius: 5,
+                    color: groupName.trim() ? '#fde68a' : '#444',
+                    cursor: groupName.trim() ? 'pointer' : 'not-allowed',
+                    fontSize: 11,
+                    fontWeight: 600,
+                  }}
+                >
+                  Create Block
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* ── Generated code modal ────────────────────────────────────────── */}
         {generatedCode && (

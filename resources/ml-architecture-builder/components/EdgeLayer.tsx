@@ -29,8 +29,8 @@ export function EdgeLayer({ nodes, edges, pending, onDeleteEdge }: Props) {
         position: 'absolute',
         top: 0,
         left: 0,
-        width: '100%',
-        height: '100%',
+        width: 1,
+        height: 1,
         overflow: 'visible',
         pointerEvents: 'none',
       }}

@@ -1,5 +1,6 @@
 import { useRef, useCallback, useState, useEffect } from 'react';
-import { GraphNode, GraphEdge, NODE_WIDTH, NODE_HEIGHT, PendingConn } from '../types';
+import { GraphNode, GraphEdge, NODE_WIDTH, NODE_HEIGHT, PendingConn, CompositeBlock } from '../types';
+import { type NodeShapeInfo, type ShapeFix } from '../shapeEngine';
 import { BlockNode } from './BlockNode';
 import { EdgeLayer } from './EdgeLayer';
 
@@ -19,19 +20,24 @@ interface DragState {
 interface Props {
   nodes: GraphNode[];
   edges: GraphEdge[];
-  selectedNodeId: string | null;
+  selectedIds: string[];
   pendingConn: PendingConn | null;
-  onAddNode: (type: string, x: number, y: number) => void;
+  shapeMap?: Map<string, NodeShapeInfo>;
+  onAddNode: (type: string, x: number, y: number, composite?: CompositeBlock) => void;
   onMoveNode: (id: string, x: number, y: number) => void;
-  onSelectNode: (id: string | null) => void;
+  onSelectNode: (id: string, addToSelection: boolean) => void;
+  onClearSelection: () => void;
   onAddEdge: (sourceId: string, targetId: string) => void;
   onDeleteEdge: (id: string) => void;
   onPendingConnChange: (conn: PendingConn | null) => void;
+  onFixConflict?: (fix: ShapeFix) => void;
+  onDoubleClickNode?: (nodeId: string) => void;
 }
 
 export function Canvas({
-  nodes, edges, selectedNodeId, pendingConn,
-  onAddNode, onMoveNode, onSelectNode, onAddEdge, onDeleteEdge, onPendingConnChange,
+  nodes, edges, selectedIds, pendingConn, shapeMap,
+  onAddNode, onMoveNode, onSelectNode, onClearSelection, onAddEdge, onDeleteEdge, onPendingConnChange,
+  onFixConflict, onDoubleClickNode,
 }: Props) {
   const containerRef = useRef<HTMLDivElement>(null);
   const dragRef      = useRef<DragState>({ type: null });
@@ -47,6 +53,8 @@ export function Canvas({
 
   // Keep ref in sync with state (used inside stable callbacks below)
   viewRef.current = view;
+
+  const selectedSet = new Set(selectedIds);
 
   // ── Coordinate helper ───────────────────────────────────────────────────
   const toCanvas = useCallback((clientX: number, clientY: number) => {
@@ -88,9 +96,9 @@ export function Canvas({
     const { panX, panY } = viewRef.current;
     dragRef.current = { type: 'pan', panStartX: e.clientX, panStartY: e.clientY, initPanX: panX, initPanY: panY };
     setIsDragging(true);
-    onSelectNode(null);
+    if (!e.shiftKey) onClearSelection();
     e.preventDefault();
-  }, [onSelectNode]);
+  }, [onClearSelection]);
 
   // ── Block mousedown (node drag start) ───────────────────────────────────
   const handleNodeMouseDown = useCallback((e: React.MouseEvent, nodeId: string) => {
@@ -100,7 +108,7 @@ export function Canvas({
     const cp   = toCanvas(e.clientX, e.clientY);
     dragRef.current = { type: 'node', nodeId, offsetX: cp.x - node.x, offsetY: cp.y - node.y };
     setIsDragging(true);
-    onSelectNode(nodeId);
+    onSelectNode(nodeId, e.shiftKey);
     e.preventDefault();
   }, [nodes, toCanvas, onSelectNode]);
 
@@ -173,7 +181,12 @@ export function Canvas({
     const { panX, panY, zoom } = viewRef.current;
     const x = (e.clientX - rect.left - panX) / zoom - NODE_WIDTH / 2;
     const y = (e.clientY - rect.top  - panY) / zoom - NODE_HEIGHT / 2;
-    onAddNode(blockType, x, y);
+    const customData = e.dataTransfer.getData('customBlockData');
+    if (customData) {
+      try { onAddNode(blockType, x, y, JSON.parse(customData) as CompositeBlock); } catch { onAddNode(blockType, x, y); }
+    } else {
+      onAddNode(blockType, x, y);
+    }
   };
 
   // ── Grid background ───────────────────────────────────────────────────────
@@ -220,10 +233,13 @@ export function Canvas({
           <BlockNode
             key={node.id}
             node={node}
-            isSelected={node.id === selectedNodeId}
+            isSelected={selectedSet.has(node.id)}
+            shapeInfo={shapeMap?.get(node.id)}
             onMouseDown={handleNodeMouseDown}
             onPortMouseDown={handlePortMouseDown}
             onPortMouseUp={handlePortMouseUp}
+            onFixConflict={onFixConflict}
+            onDoubleClick={onDoubleClickNode}
           />
         ))}
       </div>
