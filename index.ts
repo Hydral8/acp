@@ -610,34 +610,39 @@ server.tool(
 
     const mode = input.mode ?? "proxy";
 
-    const podIdWithSuffix = input.podId.endsWith("-64411bc6")
-      ? input.podId
-      : `${input.podId}-64411bc6`;
+    // Prefer info.user from runpodctl (has the correct per-account suffix like
+    // "<podId>-a1b2c3d4") over any hardcoded fallback.  The hardcoded suffix
+    // only matched the original developer's account and fails for everyone else.
     const host =
       input.host ??
-      (mode === "proxy" ? "ssh.runpod.io" : info.host);
+      (mode === "proxy" ? (info.host ?? "ssh.runpod.io") : info.host);
     const user =
       input.user ??
-      (mode === "proxy" ? podIdWithSuffix : info.user ?? "root");
+      info.user ??                           // runpodctl gives us the right value
+      (mode === "proxy" ? `${input.podId}` : "root");
     const port =
       input.port ??
-      (mode === "proxy" ? 22 : info.port ?? 22);
+      info.port ??
+      22;
     if (!host) {
       throw new Error(
         "Unable to determine SSH host. Provide host/port/user overrides."
       );
     }
 
+    // Always resolve an identity file so SSH never falls back to agent/password
+    const defaultKeyFile = path.join(homedir(), ".ssh", "id_ed25519");
+    const resolvedIdentityFile = input.identityFile
+      ? resolveHomePath(input.identityFile) ?? input.identityFile
+      : defaultKeyFile;
+
     const allocatePty = input.allocatePty !== false;
-    const baseArgs = ["-p", String(port)];
-    if (input.identityFile) baseArgs.push("-i", input.identityFile);
+    const baseArgs = ["-p", String(port), "-i", resolvedIdentityFile];
     if (allocatePty) baseArgs.push("-tt");
-    if (input.skipHostKeyCheck) {
+    if (input.skipHostKeyCheck !== false) {   // default true
       baseArgs.push(
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null"
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null"
       );
     }
 
