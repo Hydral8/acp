@@ -1,4 +1,4 @@
-import { MCPServer, object, text, widget } from "mcp-use/server";
+import { MCPServer, object, text, widget, oauthWorkOSProvider } from "mcp-use/server";
 import { execFile, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import { readFileSync } from "node:fs";
@@ -75,6 +75,13 @@ const server = new MCPServer({
   baseUrl: process.env.MCP_URL || "http://localhost:3000",
   favicon: "favicon.ico",
   icons: [{ src: "icon.svg", mimeType: "image/svg+xml", sizes: ["512x512"] }],
+  ...(process.env.WORKOS_SUBDOMAIN ? {
+    oauth: oauthWorkOSProvider({
+      subdomain: process.env.WORKOS_SUBDOMAIN,
+      clientId: process.env.WORKOS_CLIENT_ID,
+      apiKey: process.env.WORKOS_API_KEY,
+    }),
+  } : {}),
 });
 
 // ── Schemas ────────────────────────────────────────────────────────────────
@@ -1002,7 +1009,7 @@ server.tool(
 
     // Persist on server so get-training-code can retrieve it later
     savedTrainingCode = {
-      modelPy, dataPy, trainPy,
+      modelPy, dataPy, trainPy, requirementsTxt,
       meta: {
         dataset: dataset.name,
         optimizer,
@@ -1066,12 +1073,14 @@ server.tool(
           fs.readFile(TRAINING_FILES.train, "utf8"),
         ]);
         const meta = JSON.parse(metaRaw) as SavedTrainingCode["meta"];
-        savedTrainingCode = { modelPy, dataPy, trainPy, meta };
+        let reqTxt = '';
+        try { reqTxt = await fs.readFile(path.join(TRAINING_OUTPUT_DIR, "requirements.txt"), "utf8"); } catch { /* ok */ }
+        savedTrainingCode = { modelPy, dataPy, trainPy, requirementsTxt: reqTxt, meta };
       } catch {
         return object({ found: false });
       }
     }
-    const { modelPy, dataPy, trainPy, meta } = savedTrainingCode;
+    const { modelPy, dataPy, trainPy, meta } = savedTrainingCode!;
     return object({
       found: true,
       meta,
@@ -1300,54 +1309,6 @@ server.tool(
   }
 );
 
-// ── Tool: check-gpu-packages ───────────────────────────────────────────────
-
-server.tool(
-  {
-    name: 'check-gpu-packages',
-    description:
-      'Check what Python packages are installed on a RunPod GPU pod (via pip freeze). ' +
-      'Use this before setup-gpu to avoid reinstalling packages that already exist.',
-    schema: z.object({
-      podId:   z.string().describe("RunPod pod ID"),
-      keyFile: z.string().optional().describe("SSH private key path (default: ~/.ssh/id_ed25519)"),
-      sshHost: z.string().optional().describe("Override SSH host"),
-      sshPort: z.number().optional().describe("Override SSH port"),
-      sshUser: z.string().optional().describe("Override SSH user (default: root)"),
-    }),
-    outputSchema: z.object({
-      packages: z.array(z.string()),
-      packageCount: z.number(),
-      hasTorch: z.boolean(),
-      hasWandb: z.boolean(),
-      hasTransformers: z.boolean(),
-      hasDatasets: z.boolean(),
-      rawOutput: z.string(),
-    }),
-  },
-  async ({ podId, keyFile, sshHost, sshPort, sshUser }) => {
-    const sshInfo = await getPodSshInfo(podId, { host: sshHost, port: sshPort, user: sshUser });
-    const { host, port = 22, user = 'root' } = sshInfo;
-    if (!host) throw new Error(`Could not determine SSH host for pod ${podId}`);
-    const resolvedKeyFile = resolveHomePath(keyFile) ?? path.join(homedir(), ".ssh", "id_ed25519");
-    const sshBaseArgs = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile, "-p", String(port)];
-    const { stdout } = await execFileAsync("ssh", [...sshBaseArgs, `${user}@${host}`, "pip freeze 2>/dev/null || pip3 freeze 2>/dev/null"], {
-      env: process.env, timeout: 30000,
-    });
-    const packages = stdout.trim().split('\n').filter(Boolean);
-    const pkgLower = packages.map(p => p.toLowerCase());
-    return object({
-      packages,
-      packageCount: packages.length,
-      hasTorch:        pkgLower.some(p => p.startsWith('torch')),
-      hasWandb:        pkgLower.some(p => p.startsWith('wandb')),
-      hasTransformers: pkgLower.some(p => p.startsWith('transformers')),
-      hasDatasets:     pkgLower.some(p => p.startsWith('datasets')),
-      rawOutput: stdout.trim(),
-    });
-  }
-);
-
 // ── Tool: setup-gpu ────────────────────────────────────────────────────────
 
 server.tool(
@@ -1448,17 +1409,15 @@ server.tool(
   {
     name: 'upload-scripts',
     description:
-      'Upload the generated training and inference scripts (model.py, data.py, train.py, inference.py, requirements.txt) to a RunPod GPU pod via SCP. ' +
-      'Use this after generate-training-code and optionally generate-inference-code to prepare the pod for training or inference.',
+      'Write generated training/inference scripts directly to a RunPod GPU pod via SSH stdin (no SCP). ' +
+      'Reads content from in-memory saved code — no local disk files required.',
     schema: z.object({
-      podId:       z.string().describe("RunPod pod ID"),
-      remotePath:  z.string().optional().default('/workspace').describe("Remote directory to upload files to (default: /workspace)"),
-      files:       z.array(z.enum(['model', 'data', 'train', 'inference', 'requirements'])).optional()
-        .describe("Which files to upload. Omit to upload all available files."),
-      keyFile:     z.string().optional().describe("SSH private key path"),
-      sshHost:     z.string().optional().describe("Override SSH host"),
-      sshPort:     z.number().optional().describe("Override SSH port"),
-      sshUser:     z.string().optional().describe("Override SSH user (default: root)"),
+      podId:      z.string().describe("RunPod pod ID"),
+      remotePath: z.string().optional().default('/workspace').describe("Remote directory (default: /workspace)"),
+      keyFile:    z.string().optional().describe("SSH private key path"),
+      sshHost:    z.string().optional().describe("Override SSH host"),
+      sshPort:    z.number().optional().describe("Override SSH port"),
+      sshUser:    z.string().optional().describe("Override SSH user (default: root)"),
     }),
     outputSchema: z.object({
       uploaded: z.array(z.string()),
@@ -1467,49 +1426,43 @@ server.tool(
       summary:  z.string(),
     }),
   },
-  async ({ podId, remotePath = '/workspace', files, keyFile, sshHost, sshPort, sshUser }) => {
+  async ({ podId, remotePath = '/workspace', keyFile, sshHost, sshPort, sshUser }) => {
     const sshInfo = await getPodSshInfo(podId, { host: sshHost, port: sshPort, user: sshUser });
     const { host, port = 22, user = 'root' } = sshInfo;
     if (!host) throw new Error(`Could not determine SSH host for pod ${podId}`);
     const resolvedKeyFile = resolveHomePath(keyFile) ?? path.join(homedir(), ".ssh", "id_ed25519");
-    const scpKeyArgs  = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile];
-    const scpPortArgs = ["-P", String(port)];
-    const sshBaseArgs = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile, "-p", String(port)];
+    const sshArgs = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile, "-p", String(port), `${user}@${host}`];
 
-    // Ensure remote path exists
-    try {
-      await execFileAsync("ssh", [...sshBaseArgs, `${user}@${host}`, `mkdir -p ${remotePath}`], {
-        env: process.env, timeout: 10000,
-      });
-    } catch {
-      // ignore
-    }
+    // Ensure remote directory exists
+    await execFileAsync("ssh", [...sshArgs, `mkdir -p ${remotePath}`], { env: process.env, timeout: 10000 }).catch(() => {});
 
-    const fileCandidates: Array<{ key: string; localPath: string; remoteName: string }> = [
-      { key: 'model',        localPath: TRAINING_FILES.model,          remoteName: 'model.py'          },
-      { key: 'data',         localPath: TRAINING_FILES.data,           remoteName: 'data.py'           },
-      { key: 'train',        localPath: TRAINING_FILES.train,          remoteName: 'train.py'          },
-      { key: 'inference',    localPath: INFERENCE_FILES.inference,     remoteName: 'inference.py'      },
-      { key: 'requirements', localPath: path.join(TRAINING_OUTPUT_DIR, "requirements.txt"), remoteName: 'requirements.txt' },
+    // Write file content directly via SSH stdin — no SCP, no disk reads
+    const writeViaSSH = async (remoteName: string, content: string) => {
+      await execFileAsync("ssh", [...sshArgs, `cat > ${remotePath}/${remoteName}`], {
+        input: content, env: process.env, timeout: 30000,
+      } as Parameters<typeof execFileAsync>[2] & { input: string });
+    };
+
+    // Collect files from in-memory saved code
+    const fileCandidates: Array<{ remoteName: string; content: string | undefined }> = [
+      { remoteName: 'model.py',          content: savedTrainingCode?.modelPy },
+      { remoteName: 'data.py',           content: savedTrainingCode?.dataPy },
+      { remoteName: 'train.py',          content: savedTrainingCode?.trainPy },
+      { remoteName: 'requirements.txt',  content: savedTrainingCode?.requirementsTxt },
+      { remoteName: 'inference.py',      content: savedInferenceCode?.inferencePy },
     ];
 
-    const wanted = files ? new Set(files) : null;
     const uploaded: string[] = [];
     const skipped:  string[] = [];
     const errors:   string[] = [];
 
-    for (const { key, localPath, remoteName } of fileCandidates) {
-      if (wanted && !wanted.has(key as Parameters<typeof wanted.has>[0])) { skipped.push(remoteName); continue; }
-      const exists = await fs.access(localPath).then(() => true).catch(() => false);
-      if (!exists) { skipped.push(`${remoteName} (not generated)`); continue; }
+    for (const { remoteName, content } of fileCandidates) {
+      if (!content?.trim()) { skipped.push(`${remoteName} (not generated)`); continue; }
       try {
-        await execFileAsync("scp", [...scpKeyArgs, ...scpPortArgs, localPath, `${user}@${host}:${remotePath}/${remoteName}`], {
-          env: process.env, timeout: 30000,
-        });
+        await writeViaSSH(remoteName, content);
         uploaded.push(remoteName);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        errors.push(`${remoteName}: ${msg}`);
+        errors.push(`${remoteName}: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -1517,7 +1470,7 @@ server.tool(
       uploaded,
       skipped,
       errors,
-      summary: `Uploaded ${uploaded.length} file(s) to ${user}@${host}:${remotePath}. ${errors.length > 0 ? `${errors.length} error(s).` : ''}`,
+      summary: `Wrote ${uploaded.length} file(s) to ${remotePath} via SSH. ${errors.length > 0 ? `${errors.length} error(s).` : ''}`,
     });
   }
 );
@@ -2727,6 +2680,7 @@ interface SavedTrainingCode {
   modelPy: string;
   dataPy: string;
   trainPy: string;
+  requirementsTxt: string;
   meta: {
     dataset: string;
     optimizer: string;
