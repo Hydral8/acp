@@ -1041,8 +1041,6 @@ export default function MLArchitectureBuilder() {
               trainCopied={trainCopied}
               onTrainCopy={handleTrainCopy}
               trainValidations={trainValidations}
-              trainPodId={trainPodId}
-              setTrainPodId={setTrainPodId}
             />
           ) : (
             <InferBody
@@ -1292,7 +1290,7 @@ export default function MLArchitectureBuilder() {
               <span style={{ fontWeight: 700, fontSize: 12, color: '#d0d0d0', flex: 1 }}>
                 {deployPhase === 'done' ? 'Deployed Successfully' : deployPhase === 'error' ? 'Deploy Failed' : 'Deploying to RunPod'}
               </span>
-              <span style={{ fontSize: 10, color: '#333', fontFamily: 'monospace' }}>{trainPodId}</span>
+              {deployedPodId && <span style={{ fontSize: 10, color: '#2a4a2a', fontFamily: 'monospace' }}>{deployedPodId}</span>}
               {!isDeploying && (
                 <button
                   onClick={() => setShowDeployModal(false)}
@@ -1304,9 +1302,9 @@ export default function MLArchitectureBuilder() {
             {/* Steps */}
             <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
               {([
-                { key: 'generate', label: 'Generate Scripts',     icon: '⚡' },
-                { key: 'upload',   label: 'Upload to Pod',        icon: '🚀' },
-                { key: 'install',  label: 'Install Dependencies', icon: '📦' },
+                { key: 'generate',  label: 'Generate Scripts', icon: '⚡' },
+                { key: 'provision', label: 'Create GPU Pod',   icon: '🖥️' },
+                { key: 'upload',    label: 'Upload Scripts',   icon: '🚀' },
               ] as const).map(({ key, label, icon }) => {
                 const step = deploySteps[key];
                 const statusIcon =
@@ -1414,8 +1412,6 @@ interface TrainBodyProps {
   trainCopied: 'model' | 'data' | 'train' | 'req' | null;
   onTrainCopy: (key: 'model' | 'data' | 'train' | 'req') => void;
   trainValidations: Array<{ label: string; pass: boolean }>;
-  trainPodId: string;
-  setTrainPodId: (v: string) => void;
 }
 
 function TrainBody({
@@ -1432,7 +1428,6 @@ function TrainBody({
   trainWandbProject, setTrainWandbProject,
   trainCopied, onTrainCopy,
   trainValidations,
-  trainPodId, setTrainPodId,
 }: TrainBodyProps) {
   const accent = TRAIN_ACCENT[trainCategory];
   const datasets = TRAIN_DATASETS[trainCategory];
@@ -1630,29 +1625,6 @@ function TrainBody({
               style={inputStyle}
             />
           </TrainConfigRow>
-        </div>
-
-        <div style={{ borderTop: '1px solid #111', margin: '0 10px' }} />
-
-        {/* GPU Deploy */}
-        <div style={{ padding: '8px 10px 4px' }}>
-          <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase' as const, fontWeight: 700, marginBottom: 6 }}>
-            GPU Deploy
-          </div>
-          <TrainConfigRow label="Pod ID">
-            <input
-              type="text"
-              value={trainPodId}
-              onChange={e => setTrainPodId(e.target.value.trim())}
-              placeholder="abc123xyz…"
-              style={{ ...inputStyle, color: trainPodId ? '#d0d0d0' : '#555', borderColor: trainPodId ? '#166534' : '#1e1e1e' }}
-            />
-          </TrainConfigRow>
-          {trainPodId && (
-            <div style={{ fontSize: 8.5, color: '#2a4a2a', marginTop: -2, marginBottom: 4, marginLeft: 54 }}>
-              ✓ Pod set — click <span style={{ color: '#4ade80' }}>Run</span> to deploy
-            </div>
-          )}
         </div>
 
         <div style={{ borderTop: '1px solid #111', margin: '0 10px' }} />
