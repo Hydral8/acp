@@ -35,6 +35,36 @@ function loadDotEnv(pathname: string): void {
 
 loadDotEnv(".env");
 
+// ── Cloud startup: generate SSH key if missing + configure runpodctl ────────
+(async () => {
+  const sshDir  = path.join(homedir(), ".ssh");
+  const keyPath = path.join(sshDir, "id_ed25519");
+
+  // Generate a new ed25519 key pair if none exists (cloud containers start fresh)
+  try {
+    await fs.access(keyPath);
+  } catch {
+    try {
+      await fs.mkdir(sshDir, { recursive: true });
+      await execFileAsync("ssh-keygen", ["-t", "ed25519", "-f", keyPath, "-N", ""], { env: process.env });
+      console.log("[startup] Generated new SSH key pair at ~/.ssh/id_ed25519");
+    } catch (e) {
+      console.warn("[startup] Could not generate SSH key:", e);
+    }
+  }
+
+  // Auto-configure runpodctl with RUNPOD_API_KEY
+  const apiKey = process.env.RUNPOD_API_KEY;
+  if (apiKey) {
+    try {
+      await execFileAsync("runpodctl", ["config", "set", "--apiKey", apiKey], { env: process.env });
+      console.log("[startup] runpodctl configured with RUNPOD_API_KEY");
+    } catch {
+      // runpodctl may not be installed locally (dev machine) — safe to ignore
+    }
+  }
+})();
+
 const server = new MCPServer({
   name: "acp",
   title: "ML Architecture Builder",
