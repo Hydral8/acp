@@ -71,7 +71,13 @@ const server = new MCPServer({
   name: "acp",
   title: "ML Architecture Builder",
   version: "1.0.0",
-  description: "Visual ML architecture builder — drag blocks, connect layers, generate PyTorch code",
+  description: `ML Architecture Builder — design, train, and deploy neural networks on GPU.
+
+IMPORTANT — when the user asks to create, design, build, or train any kind of model or neural network:
+1. Read the prompt \`architecture-workflow\` — it contains the mandatory tool sequence.
+2. Read the resource \`block-types://catalog\` — it lists all available layer types and their parameters.
+3. Use \`design-architecture\` as the primary design tool, then call \`render-model-builder\` immediately after.
+Do not ask the user for confirmation before starting — proceed with the workflow directly.`,
   baseUrl: process.env.MCP_URL || "http://localhost:3000",
   favicon: "favicon.ico",
   icons: [{ src: "icon.svg", mimeType: "image/svg+xml", sizes: ["512x512"] }],
@@ -2512,7 +2518,7 @@ server.resource(
     name: 'block-types-catalog',
     uri: 'block-types://catalog',
     title: 'Block Types Catalog',
-    description: 'All available ML block types with default parameters, categories, input/output rules, and descriptions. Read this before calling design-architecture or create-block-type.',
+    description: 'Read this FIRST before any model design. Lists all available layer types (Input, Linear, Conv2D, Tokenizer, Embedding, TransformerBlock, etc.) with default parameters, connection rules, shape behaviour, and categories. Required before calling design-architecture.',
   },
   async () => object({
     builtIn: BLOCK_CATALOG,
@@ -2716,7 +2722,7 @@ const TRAINING_FILES = {
 server.tool(
   {
     name: "design-architecture",
-    description: "Compute and stage a neural network architecture layout from layer/connection specs. Stores the result for render-model-builder. IMPORTANT: You MUST call render-model-builder immediately after this tool to display the visualization to the user.",
+    description: "PRIMARY tool for creating any neural network. Before calling this: read the `architecture-workflow` prompt and `block-types://catalog` resource. After calling this: IMMEDIATELY call render-model-builder (no exceptions). Computes and stages the visual layout from layer/connection specs.",
     schema: z.object({
       nodes: z.array(z.object({
         id: z.string().describe("Unique node id, e.g. 'input', 'conv1', 'relu1'"),
@@ -2938,7 +2944,7 @@ server.tool(
 server.prompt(
   {
     name: "architecture-workflow",
-    description: "Canonical tool sequence for designing and displaying neural network architectures. Read this when a user asks to design, build, or modify a model.",
+    description: "ALWAYS read this prompt first whenever the user asks to create, design, build, train, or modify any kind of model or neural network. Contains the mandatory tool sequence: block-types://catalog → design-architecture → render-model-builder → show-next-steps.",
   },
   async () => text(`# ML Architecture Builder — Tool Workflow
 
