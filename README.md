@@ -1,65 +1,72 @@
-# MCP Server built with mcp-use
+# GPU and ML MCP
+Visual, end‑to‑end ML model design inside an MCP server: drag blocks to build a network, validate shapes, generate runnable PyTorch, and push training/inference to a RunPod GPU pod — all from a single interactive widget.
 
-This is an MCP server project bootstrapped with [`create-mcp-use-app`](https://mcp-use.com/docs/typescript/getting-started/quickstart).
+## What It Does
 
-## Getting Started
+- Drag‑and‑drop architecture builder with connectors, properties panel, and composite blocks.
+- Graph validation for shape compatibility before code generation.
+- One‑click PyTorch generation (model + training/inference scaffolds).
+- Training setup with dataset presets, optimizer/loss selection, and script generation.
+- RunPod integration for GPU setup, script upload, and remote inference.
 
-First, run the development server:
+## How It Works (MCP Flow)
+
+1. Call `design-architecture` (optional) to auto‑layout a graph.
+2. Call `render-model-builder` to open the visual builder.
+3. Build/edit the architecture in the UI and save automatically.
+4. Call `generate-pytorch-code` for runnable PyTorch.
+5. Use training/inference tools to generate scripts and run on RunPod.
+
+## Tech Stack
+
+- MCP server built with `mcp-use`
+- React + TypeScript UI widgets (Vite)
+- Zod for schemas and validation
+- Tailwind for styling
+- RunPod via `runpodctl` + SSH
+
+## Quickstart
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open [http://localhost:3000/inspector](http://localhost:3000/inspector) with your browser to test your server.
+Open `http://localhost:3000/inspector` and invoke `render-model-builder`.
 
-You can start building by editing the entry file. Add tools, resources, and prompts — the server auto-reloads as you edit.
+## Environment
 
-## Learn More
+- `RUNPOD_API_KEY` (optional): enables RunPod tools and auto‑configures `runpodctl`.
+- `WORKOS_SUBDOMAIN`, `WORKOS_CLIENT_ID`, `WORKOS_API_KEY` (optional): enable OAuth.
 
-To learn more about mcp-use and MCP:
+## MCP Tools (Core)
 
-- [mcp-use Documentation](https://mcp-use.com/docs/typescript/getting-started/quickstart) — guides, API reference, and tutorials
+- `render-model-builder`: opens the visual architecture builder widget.
+- `generate-pytorch-code`: validates and generates PyTorch from the saved graph.
+- `generate-training-code`: creates model/train/data scripts + requirements.
+- `generate-inference-code`: creates inference script for the current model.
+- `show-next-steps`: action panel after design (generate code, train, edit, explain).
+- `validate-graph`: returns graph validation errors.
 
-## Runpod MCP Tools
+## MCP Tools (RunPod)
 
-The server exposes a `runpod-login-deploy` tool that:
+- `runpod-login-deploy`: configure `runpodctl`, create a pod, and add SSH keys.
+- `runpod-pod-run`: run a single command on a pod over SSH.
+- `setup-gpu`: install Python deps on a pod using generated requirements.
+- `upload-scripts`: write generated scripts to a pod via SSH.
+- `run-inference`: upload and execute inference on a pod.
 
-1. Configures `runpodctl` with your API key.
-2. Creates a pod using `runpodctl create pod`.
-3. Ensures an SSH key is present on your machine and added to Runpod (defaults to `~/.ssh/id_ed25519`; disable with `ensureKey: false`).
+## Project Structure
 
-Requirements:
+- `index.ts`: MCP server, tool definitions, graph validation, code generation.
+- `resources/ml-architecture-builder/`: main visual builder widget.
+- `resources/training-deploy.tsx`: training setup + RunPod deploy UI.
+- `resources/next-steps.tsx`: post‑design action panel widget.
 
-- `runpodctl` installed and available on your `PATH`.
-
-Inputs (high level):
-
-- `apiKey` (required unless `RUNPOD_API_KEY` is set)
-- `gpuType` (required)
-- `imageName` or `templateId` (required)
-- Optional flags like `gpuCount`, `secureCloud`, `communityCloud`, `volumeSize`, `env`, `ports`
-
-The server also exposes:
-
-- `runpod-pod-run`: runs a single command on a pod over SSH and returns stdout/stderr.
-
-Common inputs:
-
-- `podId` (required)
-- `ensureKey` (optional): add an SSH key via `runpodctl ssh add-key`
-- `generateKey` (optional): generate a new keypair first (default true)
-- `keyPath` (optional): private key path (default `~/.ssh/id_ed25519`)
-- `key` / `keyFile` (optional): SSH public key contents or file path (if you don't want to generate)
-- `host` / `port` / `user` (optional overrides if SSH details cannot be parsed)
-- `identityFile` (optional, `runpod-pod-run`): SSH private key path
-- `allocatePty` (optional, `runpod-pod-run`): request a PTY (default true)
-- `timeoutMs` (optional, `runpod-pod-run`): SSH process timeout in ms (default 15000)
-- `mode` (optional, `runpod-pod-run`): `proxy` (ssh.runpod.io, default) or `direct` (public-IP SSH)
-- `skipHostKeyCheck` (optional, `runpod-pod-run`): disable strict host key checking
-
-## Deploy on Manufact Cloud
+## Deployment
 
 ```bash
 npm run deploy
 ```
+
+The `Dockerfile` installs `runpodctl` for RunPod‑enabled deployments.
