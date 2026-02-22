@@ -35,6 +35,8 @@ function loadDotEnv(pathname: string): void {
 
 loadDotEnv(".env");
 
+const execFileAsync = promisify(execFile);
+
 // ── Cloud startup: generate SSH key if missing + configure runpodctl ────────
 (async () => {
   const sshDir  = path.join(homedir(), ".ssh");
@@ -119,8 +121,6 @@ const graphSchema = z.object({
 });
 
 // ── Tool: render-model-builder ─────────────────────────────────────────────
-
-const execFileAsync = promisify(execFile);
 
 type RunpodctlResult = {
   stdout: string;
