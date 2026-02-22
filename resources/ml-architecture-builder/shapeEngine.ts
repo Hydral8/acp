@@ -26,7 +26,7 @@ function computeOutput(
   type: string, p: Record<string, unknown>, inShape: Shape | null,
 ): { outShape: Shape | null; conflict: string | null; expectedDim?: { pos: 'last' | 'ch'; val: number } } {
   const v = (k: string, fb = 0) => (typeof p[k] === 'number' ? (p[k] as number) : fb);
-  if (!inShape && type !== 'Input' && type !== 'Tokenizer') return { outShape: null, conflict: null };
+  if (!inShape && type !== 'Input') return { outShape: null, conflict: null };
 
   switch (type) {
     case 'Input':
