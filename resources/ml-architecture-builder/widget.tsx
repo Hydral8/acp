@@ -20,9 +20,9 @@ interface InferResult { result?: Record<string, unknown>; rawOutput?: string; er
 type DeployStepStatus = 'pending' | 'running' | 'done' | 'error' | 'skipped';
 interface DeployStepState { status: DeployStepStatus; detail?: string; }
 interface DeployStepsState {
-  generate: DeployStepState;
-  upload: DeployStepState;
-  install: DeployStepState;
+  generate:  DeployStepState;
+  provision: DeployStepState;
+  upload:    DeployStepState;
 }
 
 const TRAIN_DATASETS: Record<CatKey, DatasetDef[]> = {
@@ -137,6 +137,7 @@ export default function MLArchitectureBuilder() {
   const { callToolAsync: callGetTraining } = useCallTool('get-training-code');
   const { callToolAsync: callGenInference, isPending: isGeneratingInference } = useCallTool('generate-inference-code');
   const { callToolAsync: callRunInference, isPending: isRunningInference } = useCallTool('run-inference');
+  const { callToolAsync: callCreatePod } = useCallTool('runpod-login-deploy');
   const { callToolAsync: callRunpodRun } = useCallTool('runpod-pod-run');
   const callSaveRef = useRef(callSave);
   callSaveRef.current = callSave;
@@ -184,14 +185,14 @@ export default function MLArchitectureBuilder() {
   const [inferScriptCopied, setInferScriptCopied] = useState(false);
 
   // ── Deploy (Run) state ────────────────────────────────────────────────────
-  const [trainPodId, setTrainPodId] = useState('');
+  const [deployedPodId, setDeployedPodId] = useState('');
   const [showDeployModal, setShowDeployModal] = useState(false);
   const [deployPhase, setDeployPhase] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
   const [isDeploying, setIsDeploying] = useState(false);
   const [deploySteps, setDeploySteps] = useState<DeployStepsState>({
-    generate: { status: 'pending' },
-    upload:   { status: 'pending' },
-    install:  { status: 'pending' },
+    generate:  { status: 'pending' },
+    provision: { status: 'pending' },
+    upload:    { status: 'pending' },
   });
 
   // ── Graph mutations ──────────────────────────────────────────────────────
@@ -575,12 +576,10 @@ export default function MLArchitectureBuilder() {
   }, [callGenInference]);
 
   const handleRun = useCallback(async () => {
-    if (!trainPodId) return;
-
     const initSteps: DeployStepsState = {
-      generate: { status: generatedFiles ? 'skipped' : 'pending' },
-      upload:   { status: 'pending' },
-      install:  { status: 'pending' },
+      generate:  { status: generatedFiles ? 'skipped' : 'pending' },
+      provision: { status: 'pending' },
+      upload:    { status: 'pending' },
     };
     setDeploySteps(initSteps);
     setDeployPhase('running');
@@ -588,6 +587,7 @@ export default function MLArchitectureBuilder() {
     setShowDeployModal(true);
 
     let files = generatedFiles;
+    let podId = '';
 
     try {
       // Step 1: Generate scripts (if not already done)
@@ -618,7 +618,24 @@ export default function MLArchitectureBuilder() {
         setDeploySteps(prev => ({ ...prev, generate: { status: 'skipped', detail: 'Already generated' } }));
       }
 
-      // Step 2: Upload scripts via runpod-pod-run (base64-encoded per file)
+      // Step 2: Auto-provision a RunPod GPU pod
+      setDeploySteps(prev => ({ ...prev, provision: { status: 'running' } }));
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const createResult = await callCreatePod({} as any);
+        const sc = createResult?.structuredContent as { createStdout?: string } | undefined;
+        const match = sc?.createStdout?.match(/pod "([^"]+)"/);
+        podId = match?.[1] ?? '';
+        if (!podId) throw new Error(`Could not parse pod ID from: ${sc?.createStdout ?? '(no output)'}`);
+        setDeployedPodId(podId);
+        setDeploySteps(prev => ({ ...prev, provision: { status: 'done', detail: podId } }));
+      } catch (e) {
+        setDeploySteps(prev => ({ ...prev, provision: { status: 'error', detail: String(e) } }));
+        setDeployPhase('error');
+        return;
+      }
+
+      // Step 3: Upload scripts via runpod-pod-run (base64-encoded per file)
       setDeploySteps(prev => ({ ...prev, upload: { status: 'running' } }));
       const uploadCandidates: Array<{ name: string; content: string }> = [
         { name: 'model.py',         content: files.modelPy },
@@ -632,7 +649,7 @@ export default function MLArchitectureBuilder() {
         try {
           const b64 = btoa(unescape(encodeURIComponent(content)));
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          await callRunpodRun({ podId: trainPodId, command: `echo '${b64}' | base64 -d > /workspace/${name}`, timeoutMs: 15000 } as any);
+          await callRunpodRun({ podId, command: `echo '${b64}' | base64 -d > /workspace/${name}`, timeoutMs: 15000 } as any);
           uploaded.push(name);
         } catch (e) {
           uploadErrors.push(`${name}: ${String(e)}`);
@@ -644,22 +661,11 @@ export default function MLArchitectureBuilder() {
         return;
       }
       setDeploySteps(prev => ({ ...prev, upload: { status: 'done', detail: uploaded.join(', ') } }));
-
-      // Step 3: Install dependencies
-      setDeploySteps(prev => ({ ...prev, install: { status: 'running' } }));
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        await callRunpodRun({ podId: trainPodId, command: 'pip install -q -r /workspace/requirements.txt 2>&1', timeoutMs: 300000 } as any);
-        setDeploySteps(prev => ({ ...prev, install: { status: 'done', detail: 'pip install complete' } }));
-        setDeployPhase('done');
-      } catch (e) {
-        setDeploySteps(prev => ({ ...prev, install: { status: 'error', detail: String(e) } }));
-        setDeployPhase('error');
-      }
+      setDeployPhase('done');
     } finally {
       setIsDeploying(false);
     }
-  }, [trainPodId, generatedFiles, trainSelected, trainOptimizer, trainLoss, trainLR, trainBatchSize, trainEpochs, trainWandbProject, callGenTraining, callRunpodRun]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [generatedFiles, trainSelected, trainOptimizer, trainLoss, trainLR, trainBatchSize, trainEpochs, trainWandbProject, callGenTraining, callCreatePod, callRunpodRun]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleRunInference = useCallback(async () => {
     if (!inferPodId || !inferInput) return;
@@ -917,15 +923,15 @@ export default function MLArchitectureBuilder() {
               </button>
               <button
                 onClick={handleRun}
-                disabled={isDeploying || (!trainPodId) || (!canGenerateTraining && !generatedFiles)}
-                title={!trainPodId ? 'Enter a Pod ID in the Deploy section' : !canGenerateTraining && !generatedFiles ? 'Fix validation errors first' : 'Deploy scripts and prepare GPU pod'}
+                disabled={isDeploying || (!canGenerateTraining && !generatedFiles)}
+                title={!canGenerateTraining && !generatedFiles ? 'Fix validation errors first' : 'Create GPU pod and deploy scripts'}
                 style={{
                   padding: '5px 12px',
-                  backgroundColor: isDeploying ? '#0a1a0a' : trainPodId && (canGenerateTraining || generatedFiles) ? '#15803d' : '#111',
-                  border: `1px solid ${isDeploying ? '#1a3a1a' : trainPodId && (canGenerateTraining || generatedFiles) ? '#166534' : '#1e1e1e'}`,
+                  backgroundColor: isDeploying ? '#0a1a0a' : (canGenerateTraining || generatedFiles) ? '#15803d' : '#111',
+                  border: `1px solid ${isDeploying ? '#1a3a1a' : (canGenerateTraining || generatedFiles) ? '#166534' : '#1e1e1e'}`,
                   borderRadius: 5,
-                  color: isDeploying ? '#4ade80' : trainPodId && (canGenerateTraining || generatedFiles) ? '#fff' : '#2a2a2a',
-                  cursor: isDeploying || !trainPodId || (!canGenerateTraining && !generatedFiles) ? 'not-allowed' : 'pointer',
+                  color: isDeploying ? '#4ade80' : (canGenerateTraining || generatedFiles) ? '#fff' : '#2a2a2a',
+                  cursor: isDeploying || (!canGenerateTraining && !generatedFiles) ? 'not-allowed' : 'pointer',
                   fontSize: 11,
                   fontWeight: 600,
                   letterSpacing: 0.3,

@@ -2,7 +2,6 @@
   "dataset": "TinyStories",
   "optimizer": "AdamW",
   "loss": "CrossEntropyLoss",
-  "taskType": "causal-lm",
-  "generatedAt": "2026-02-22T00:26:52.768Z",
-  "wandbProject": "simple-gpt-training"
+  "taskType": "causal_lm",
+  "generatedAt": "2026-02-22T00:33:42.725Z"
 }

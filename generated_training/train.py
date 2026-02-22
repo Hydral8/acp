@@ -9,9 +9,9 @@ from data import get_dataloaders
 DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
 LR            = 0.0003
 BATCH         = 32
-EPOCHS        = 3
+EPOCHS        = 5
 SAVE_PATH     = "checkpoint_best.pt"
-WANDB_PROJECT = "simple-gpt-training"
+WANDB_PROJECT = "my-model"
 WANDB_ENTITY  = None   # set to your W&B username/team, or None for default
 
 
