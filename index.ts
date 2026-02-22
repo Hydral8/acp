@@ -302,6 +302,33 @@ async function getPodSshInfo(
   return info;
 }
 
+/**
+ * Poll until the pod is RUNNING and SSH info is available.
+ * Pods typically take 60–120 s to start after creation.
+ */
+async function waitForPodReady(
+  podId: string,
+  maxWaitMs = 180_000,
+  pollIntervalMs = 8_000,
+): Promise<SshInfo> {
+  const deadline = Date.now() + maxWaitMs;
+  let lastRaw = "";
+  while (Date.now() < deadline) {
+    const { stdout } = await runpodctl(["get", "pod", podId, "--allfields"]);
+    lastRaw = stdout;
+    const lower = stdout.toLowerCase();
+    const info = parseSshInfo(stdout);
+    // Consider ready when the pod is running AND we have a username to connect with
+    if ((lower.includes('"running"') || lower.includes("running")) && info.user) {
+      return info;
+    }
+    await new Promise((res) => setTimeout(res, pollIntervalMs));
+  }
+  throw new Error(
+    `Pod ${podId} did not become ready within ${maxWaitMs / 1000}s.\nLast runpodctl output:\n${lastRaw}`
+  );
+}
+
 function resolveHomePath(filePath?: string): string | undefined {
   if (!filePath) return undefined;
   if (filePath === "~") return homedir();
@@ -602,11 +629,18 @@ server.tool(
       await ensureRunpodSshKey(input.key, input.keyFile);
     }
 
-    const info = await getPodSshInfo(input.podId, {
-      host: input.host,
-      port: input.port,
-      user: input.user,
-    });
+    // If no overrides are given, wait until the pod is RUNNING with SSH info.
+    // Pods typically take 60–120 s after creation before SSH is available.
+    let info: SshInfo;
+    if (input.host || input.port || input.user) {
+      info = await getPodSshInfo(input.podId, {
+        host: input.host,
+        port: input.port,
+        user: input.user,
+      });
+    } else {
+      info = await waitForPodReady(input.podId);
+    }
 
     const mode = input.mode ?? "proxy";
 
@@ -689,16 +723,22 @@ server.tool(
       child.on("close", (code, signal) => {
         clearTimeout(timer);
         if (timedOut) {
+          const stderrSoFar = Buffer.concat(stderrChunks).toString("utf8").trim();
           return reject(
-            new Error(`SSH command timed out after ${timeoutMs} ms`)
+            new Error(
+              `SSH command timed out after ${timeoutMs} ms\n` +
+              `Command: ssh ${sshArgs.join(" ")}\n` +
+              (stderrSoFar ? `Stderr: ${stderrSoFar}` : "")
+            )
           );
         }
         if (code !== 0) {
+          const stderrMsg = Buffer.concat(stderrChunks).toString("utf8").trim();
           return reject(
             new Error(
-              `SSH command failed with code ${code ?? "null"} signal ${
-                signal ?? "null"
-              }`
+              `SSH command failed with code ${code ?? "null"} signal ${signal ?? "null"}\n` +
+              `Command: ssh ${sshArgs.join(" ")}\n` +
+              (stderrMsg ? `Stderr: ${stderrMsg}` : "(no stderr output)")
             )
           );
         }
