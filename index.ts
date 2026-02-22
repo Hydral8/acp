@@ -576,7 +576,7 @@ server.tool(
         .int()
         .positive()
         .optional()
-        .describe("Kill the SSH command after this many milliseconds (default: 15000)"),
+        .describe("Kill the SSH command after this many milliseconds (default: 60000)"),
       skipHostKeyCheck: z
         .boolean()
         .optional()
@@ -640,7 +640,7 @@ server.tool(
       const sshArgs = [...baseArgs, `${user}@${host}`, remoteCommand];
       const { stdout, stderr } = await execFileAsync("ssh", sshArgs, {
         env: process.env,
-        timeout: input.timeoutMs ?? 15000,
+        timeout: input.timeoutMs ?? 60000,
       });
       return object({
         sshCommand: `ssh ${sshArgs.map((arg) => JSON.stringify(arg)).join(" ")}`,
@@ -656,7 +656,7 @@ server.tool(
       stdio: ["pipe", "pipe", "pipe"],
     });
 
-    const timeoutMs = input.timeoutMs ?? 15000;
+    const timeoutMs = input.timeoutMs ?? 60000;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
