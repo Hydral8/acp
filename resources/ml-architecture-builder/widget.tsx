@@ -10,10 +10,21 @@ import { CompositeDetailModal } from './components/CompositeDetailModal';
 
 // ── Train-view types & data ────────────────────────────────────────────────
 
-type ViewMode = 'design' | 'train';
+type ViewMode = 'design' | 'train' | 'infer';
 type CatKey = 'llm' | 'vlm' | 'rlhf' | 'cv' | 'tabular';
 interface DatasetDef { id: string; name: string; hfId: string; description: string; size: string; task: string; }
-interface GeneratedFiles { modelPy: string; dataPy: string; trainPy: string; }
+interface GeneratedFiles { modelPy: string; dataPy: string; trainPy: string; requirementsTxt: string; wandbProject?: string; }
+interface GeneratedInference { inferencePy: string; taskType: string; inputFormat: string; }
+interface InferResult { result?: Record<string, unknown>; rawOutput?: string; error?: string; }
+
+type DeployStepStatus = 'pending' | 'running' | 'done' | 'error' | 'skipped';
+interface DeployStepState { status: DeployStepStatus; detail?: string; }
+interface DeployStepsState {
+  generate: DeployStepState;
+  check: DeployStepState;
+  install: DeployStepState;
+  upload: DeployStepState;
+}
 
 const TRAIN_DATASETS: Record<CatKey, DatasetDef[]> = {
   llm: [
@@ -100,7 +111,7 @@ const designNodeSchema = z.object({
 const propsSchema = z.object({
   initialNodes: z.array(designNodeSchema).optional(),
   initialEdges: z.array(designEdgeSchema).optional(),
-  initialMode: z.enum(['design', 'train']).optional(),
+  initialMode: z.enum(['design', 'train', 'infer']).optional(),
 });
 type Props = z.infer<typeof propsSchema>;
 
@@ -125,6 +136,11 @@ export default function MLArchitectureBuilder() {
   const { callToolAsync: callSave } = useCallTool('save-design');
   const { callToolAsync: callGenTraining, isPending: isGeneratingTraining } = useCallTool('generate-training-code');
   const { callToolAsync: callGetTraining } = useCallTool('get-training-code');
+  const { callToolAsync: callGenInference, isPending: isGeneratingInference } = useCallTool('generate-inference-code');
+  const { callToolAsync: callRunInference, isPending: isRunningInference } = useCallTool('run-inference');
+  const { callToolAsync: callCheckGpuPkgs } = useCallTool('check-gpu-packages');
+  const { callToolAsync: callSetupGpu } = useCallTool('setup-gpu');
+  const { callToolAsync: callUploadScripts } = useCallTool('upload-scripts');
   const callSaveRef = useRef(callSave);
   callSaveRef.current = callSave;
 
@@ -159,7 +175,28 @@ export default function MLArchitectureBuilder() {
   const [simRunning, setSimRunning] = useState(false);
   const [animStep, setAnimStep] = useState(0);
   const [generatedFiles, setGeneratedFiles] = useState<GeneratedFiles | null>(null);
-  const [trainCopied, setTrainCopied] = useState<'model' | 'data' | 'train' | null>(null);
+  const [trainCopied, setTrainCopied] = useState<'model' | 'data' | 'train' | 'req' | null>(null);
+  const [trainWandbProject, setTrainWandbProject] = useState('my-model');
+
+  // ── Infer state ───────────────────────────────────────────────────────────
+  const [inferInput, setInferInput] = useState('');
+  const [inferInputType, setInferInputType] = useState<'text' | 'image_url' | 'image_base64' | 'tabular'>('text');
+  const [inferPodId, setInferPodId] = useState('');
+  const [inferResult, setInferResult] = useState<InferResult | null>(null);
+  const [inferGenerated, setInferGenerated] = useState<GeneratedInference | null>(null);
+  const [inferScriptCopied, setInferScriptCopied] = useState(false);
+
+  // ── Deploy (Run) state ────────────────────────────────────────────────────
+  const [trainPodId, setTrainPodId] = useState('');
+  const [showDeployModal, setShowDeployModal] = useState(false);
+  const [deployPhase, setDeployPhase] = useState<'idle' | 'running' | 'done' | 'error'>('idle');
+  const [isDeploying, setIsDeploying] = useState(false);
+  const [deploySteps, setDeploySteps] = useState<DeployStepsState>({
+    generate: { status: 'pending' },
+    check: { status: 'pending' },
+    install: { status: 'pending' },
+    upload: { status: 'pending' },
+  });
 
   // ── Graph mutations ──────────────────────────────────────────────────────
 
@@ -283,9 +320,9 @@ export default function MLArchitectureBuilder() {
     trainScriptsFetchedRef.current = true;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     callGetTraining({ file: 'all' } as any).then(result => {
-      const sc = result?.structuredContent as { found?: boolean; modelPy?: string; dataPy?: string; trainPy?: string } | undefined;
+      const sc = result?.structuredContent as { found?: boolean; modelPy?: string; dataPy?: string; trainPy?: string; wandbProject?: string } | undefined;
       if (sc?.found && (sc.modelPy || sc.trainPy)) {
-        setGeneratedFiles({ modelPy: sc.modelPy ?? '', dataPy: sc.dataPy ?? '', trainPy: sc.trainPy ?? '' });
+        setGeneratedFiles({ modelPy: sc.modelPy ?? '', dataPy: sc.dataPy ?? '', trainPy: sc.trainPy ?? '', requirementsTxt: '', wandbProject: sc.wandbProject });
       }
     }).catch(() => {});
   }, [viewMode]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -493,28 +530,166 @@ export default function MLArchitectureBuilder() {
         optimizer: trainOptimizer,
         loss: trainLoss,
         hyperparams: { lr: trainLR, batch_size: trainBatchSize, epochs: trainEpochs },
+        wandb: { project: trainWandbProject },
       } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
-      const sc = result?.structuredContent as { modelPy?: string; dataPy?: string; trainPy?: string } | undefined;
+      const sc = result?.structuredContent as {
+        modelPy?: string; dataPy?: string; trainPy?: string;
+        requirementsTxt?: string; wandbProject?: string;
+      } | undefined;
       if (sc?.modelPy || sc?.trainPy) {
-        setGeneratedFiles({ modelPy: sc.modelPy ?? '', dataPy: sc.dataPy ?? '', trainPy: sc.trainPy ?? '' });
+        setGeneratedFiles({
+          modelPy: sc.modelPy ?? '', dataPy: sc.dataPy ?? '', trainPy: sc.trainPy ?? '',
+          requirementsTxt: sc.requirementsTxt ?? '', wandbProject: sc.wandbProject,
+        });
       }
     } catch (err) {
       console.error('[generate-training-code]', err);
     }
   }, [trainSelected, trainOptimizer, trainLoss, trainLR, trainBatchSize, trainEpochs, callGenTraining]);
 
-  const handleTrainCopy = useCallback((key: 'model' | 'data' | 'train') => {
+  const handleTrainCopy = useCallback((key: 'model' | 'data' | 'train' | 'req') => {
     if (!generatedFiles) return;
-    const text = key === 'model' ? generatedFiles.modelPy : key === 'data' ? generatedFiles.dataPy : generatedFiles.trainPy;
+    const text = key === 'model' ? generatedFiles.modelPy : key === 'data' ? generatedFiles.dataPy : key === 'req' ? generatedFiles.requirementsTxt : generatedFiles.trainPy;
     navigator.clipboard.writeText(text).then(() => {
       setTrainCopied(key);
       setTimeout(() => setTrainCopied(null), 1800);
     });
   }, [generatedFiles]);
 
+  const handleGenerateInference = useCallback(async () => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await callGenInference({} as any);
+      const sc = result?.structuredContent as { inferencePy?: string; taskType?: string; inputFormat?: string } | undefined;
+      if (sc?.inferencePy) {
+        const gen: GeneratedInference = {
+          inferencePy: sc.inferencePy,
+          taskType: sc.taskType ?? 'unknown',
+          inputFormat: sc.inputFormat ?? '{"input": "..."}',
+        };
+        setInferGenerated(gen);
+        // Auto-set input type based on task
+        if (sc.taskType === 'vision') setInferInputType('image_url');
+        else if (sc.taskType === 'tabular') setInferInputType('tabular');
+        else setInferInputType('text');
+      }
+    } catch (err) {
+      console.error('[generate-inference-code]', err);
+    }
+  }, [callGenInference]);
+
+  const handleRun = useCallback(async () => {
+    if (!trainPodId) return;
+
+    const initSteps: DeployStepsState = {
+      generate: { status: generatedFiles ? 'skipped' : 'pending' },
+      check:    { status: 'pending' },
+      install:  { status: 'pending' },
+      upload:   { status: 'pending' },
+    };
+    setDeploySteps(initSteps);
+    setDeployPhase('running');
+    setIsDeploying(true);
+    setShowDeployModal(true);
+
+    try {
+      // Step 1: Generate scripts (if not already done)
+      if (!generatedFiles) {
+        setDeploySteps(prev => ({ ...prev, generate: { status: 'running' } }));
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const result = await callGenTraining({
+            dataset: { name: trainSelected!.name, source: 'huggingface', hfId: trainSelected!.hfId },
+            optimizer: trainOptimizer, loss: trainLoss,
+            hyperparams: { lr: trainLR, batch_size: trainBatchSize, epochs: trainEpochs },
+            wandb: { project: trainWandbProject },
+          } as any);
+          const sc = result?.structuredContent as { modelPy?: string; dataPy?: string; trainPy?: string; requirementsTxt?: string; wandbProject?: string } | undefined;
+          if (sc?.modelPy || sc?.trainPy) {
+            setGeneratedFiles({ modelPy: sc!.modelPy ?? '', dataPy: sc!.dataPy ?? '', trainPy: sc!.trainPy ?? '', requirementsTxt: sc!.requirementsTxt ?? '', wandbProject: sc!.wandbProject });
+            setDeploySteps(prev => ({ ...prev, generate: { status: 'done', detail: '4 scripts generated' } }));
+          } else {
+            throw new Error('No scripts returned');
+          }
+        } catch (e) {
+          setDeploySteps(prev => ({ ...prev, generate: { status: 'error', detail: String(e) } }));
+          setDeployPhase('error');
+          return;
+        }
+      } else {
+        setDeploySteps(prev => ({ ...prev, generate: { status: 'skipped', detail: 'Already generated' } }));
+      }
+
+      // Step 2: Check installed packages
+      setDeploySteps(prev => ({ ...prev, check: { status: 'running' } }));
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const checkResult = await callCheckGpuPkgs({ podId: trainPodId } as any);
+        const sc = checkResult?.structuredContent as { packageCount?: number; hasTorch?: boolean; hasWandb?: boolean } | undefined;
+        const flags = [sc?.hasTorch && 'torch', sc?.hasWandb && 'wandb'].filter(Boolean).join(', ');
+        setDeploySteps(prev => ({ ...prev, check: { status: 'done', detail: `${sc?.packageCount ?? '?'} pkgs — ${flags || 'checked'}` } }));
+      } catch (e) {
+        setDeploySteps(prev => ({ ...prev, check: { status: 'error', detail: String(e) } }));
+        setDeployPhase('error');
+        return;
+      }
+
+      // Step 3: Install missing packages
+      setDeploySteps(prev => ({ ...prev, install: { status: 'running' } }));
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const installResult = await callSetupGpu({ podId: trainPodId } as any);
+        const sc = installResult?.structuredContent as { installed?: string[]; skipped?: string[] } | undefined;
+        const installed = sc?.installed ?? [];
+        const skippedCount = sc?.skipped?.length ?? 0;
+        const detail = installed.length > 0
+          ? `Installed: ${installed.slice(0, 3).join(', ')}${installed.length > 3 ? ` +${installed.length - 3}` : ''}`
+          : `All ${skippedCount} packages already present`;
+        setDeploySteps(prev => ({ ...prev, install: { status: 'done', detail } }));
+      } catch (e) {
+        // Non-fatal — continue to upload
+        setDeploySteps(prev => ({ ...prev, install: { status: 'error', detail: String(e) } }));
+      }
+
+      // Step 4: Upload scripts
+      setDeploySteps(prev => ({ ...prev, upload: { status: 'running' } }));
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const uploadResult = await callUploadScripts({ podId: trainPodId } as any);
+        const sc = uploadResult?.structuredContent as { uploaded?: string[] } | undefined;
+        const files = sc?.uploaded ?? [];
+        setDeploySteps(prev => ({ ...prev, upload: { status: 'done', detail: files.join(', ') || 'Files uploaded' } }));
+        setDeployPhase('done');
+      } catch (e) {
+        setDeploySteps(prev => ({ ...prev, upload: { status: 'error', detail: String(e) } }));
+        setDeployPhase('error');
+      }
+    } finally {
+      setIsDeploying(false);
+    }
+  }, [trainPodId, generatedFiles, trainSelected, trainOptimizer, trainLoss, trainLR, trainBatchSize, trainEpochs, trainWandbProject, callGenTraining, callCheckGpuPkgs, callSetupGpu, callUploadScripts]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const handleRunInference = useCallback(async () => {
+    if (!inferPodId || !inferInput) return;
+    setInferResult(null);
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await callRunInference({
+        podId: inferPodId,
+        input: inferInput,
+        inputType: inferInputType,
+      } as any);
+      const sc = result?.structuredContent as InferResult | undefined;
+      setInferResult(sc ?? { error: 'No response from server' });
+    } catch (err) {
+      setInferResult({ error: String(err) });
+    }
+  }, [inferPodId, inferInput, inferInputType, callRunInference]);
+
   // When a dataset is selected: auto-fix Input shape, then cascade-fix downstream conflicts
   const handleDatasetSelect = useCallback((ds: DatasetDef | null) => {
     setTrainSelected(ds);
+    if (ds) setTrainWandbProject(ds.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''));
     if (!ds) return;
     const targetShape = PREPROCESS_OUT_SHAPE[trainCategory];
     setNodes(prevNodes => {
@@ -610,7 +785,7 @@ export default function MLArchitectureBuilder() {
 
           {/* Design / Train mode tabs */}
           <div style={{ display: 'flex', gap: 2, backgroundColor: '#0d0d0d', borderRadius: 5, padding: 2, border: '1px solid #1a1a1a' }}>
-            {(['design', 'train'] as ViewMode[]).map(mode => (
+            {(['design', 'train', 'infer'] as ViewMode[]).map(mode => (
               <button
                 key={mode}
                 onClick={() => setViewMode(mode)}
@@ -733,22 +908,36 @@ export default function MLArchitectureBuilder() {
                 {simRunning ? 'Stop' : 'Run Dummy'}
               </button>
               <button
-                disabled
-                title="Training not yet implemented"
+                onClick={handleRun}
+                disabled={isDeploying || (!trainPodId) || (!canGenerateTraining && !generatedFiles)}
+                title={!trainPodId ? 'Enter a Pod ID in the Deploy section' : !canGenerateTraining && !generatedFiles ? 'Fix validation errors first' : 'Deploy scripts and prepare GPU pod'}
                 style={{
                   padding: '5px 12px',
-                  backgroundColor: '#111',
-                  border: '1px solid #1e1e1e',
+                  backgroundColor: isDeploying ? '#0a1a0a' : trainPodId && (canGenerateTraining || generatedFiles) ? '#15803d' : '#111',
+                  border: `1px solid ${isDeploying ? '#1a3a1a' : trainPodId && (canGenerateTraining || generatedFiles) ? '#166534' : '#1e1e1e'}`,
                   borderRadius: 5,
-                  color: '#2a2a2a',
-                  cursor: 'not-allowed',
+                  color: isDeploying ? '#4ade80' : trainPodId && (canGenerateTraining || generatedFiles) ? '#fff' : '#2a2a2a',
+                  cursor: isDeploying || !trainPodId || (!canGenerateTraining && !generatedFiles) ? 'not-allowed' : 'pointer',
                   fontSize: 11,
                   fontWeight: 600,
                   letterSpacing: 0.3,
+                  transition: 'all 0.15s',
                 }}
               >
-                Run
+                {isDeploying ? 'Deploying…' : 'Run'}
               </button>
+            </>
+          )}
+
+          {/* Infer-mode controls */}
+          {viewMode === 'infer' && (
+            <>
+              {inferGenerated && (
+                <span style={{ fontSize: 9, padding: '2px 7px', borderRadius: 3, backgroundColor: '#0a1a0a', color: '#4ade80', border: '1px solid #166534', fontWeight: 600 }}>
+                  {inferGenerated.taskType}
+                </span>
+              )}
+              <span style={{ fontSize: 10, color: '#333' }}>GPU Inference</span>
             </>
           )}
         </div>
@@ -810,7 +999,7 @@ export default function MLArchitectureBuilder() {
                 />
               )}
             </>
-          ) : (
+          ) : viewMode === 'train' ? (
             <TrainBody
               trainSortedNodes={trainSortedNodes}
               shapeMap={shapeMap}
@@ -833,9 +1022,36 @@ export default function MLArchitectureBuilder() {
               isGeneratingTraining={isGeneratingTraining}
               canGenerateTraining={canGenerateTraining}
               onGenerateTraining={handleGenerateTraining}
+              trainWandbProject={trainWandbProject}
+              setTrainWandbProject={setTrainWandbProject}
               trainCopied={trainCopied}
               onTrainCopy={handleTrainCopy}
               trainValidations={trainValidations}
+              trainPodId={trainPodId}
+              setTrainPodId={setTrainPodId}
+            />
+          ) : (
+            <InferBody
+              inferGenerated={inferGenerated}
+              isGeneratingInference={isGeneratingInference}
+              onGenerateInference={handleGenerateInference}
+              inferInput={inferInput}
+              setInferInput={setInferInput}
+              inferInputType={inferInputType}
+              setInferInputType={setInferInputType}
+              inferPodId={inferPodId}
+              setInferPodId={setInferPodId}
+              inferResult={inferResult}
+              isRunningInference={isRunningInference}
+              onRunInference={handleRunInference}
+              inferScriptCopied={inferScriptCopied}
+              onCopyScript={() => {
+                if (!inferGenerated) return;
+                navigator.clipboard.writeText(inferGenerated.inferencePy).then(() => {
+                  setInferScriptCopied(true);
+                  setTimeout(() => setInferScriptCopied(false), 1800);
+                });
+              }}
             />
           )}
         </div>
@@ -1027,6 +1243,130 @@ export default function MLArchitectureBuilder() {
             </div>
           </div>
         )}
+      {/* ── Deploy modal ────────────────────────────────────────────────── */}
+      {showDeployModal && (
+        <div
+          onClick={e => { if (e.target === e.currentTarget && !isDeploying) setShowDeployModal(false); }}
+          style={{
+            position: 'fixed', inset: 0,
+            backgroundColor: 'rgba(0,0,0,0.88)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            zIndex: 200,
+          }}
+        >
+          <div style={{
+            backgroundColor: '#080808',
+            border: '1px solid #202020',
+            borderRadius: 10,
+            width: 420,
+            padding: 0,
+            boxShadow: '0 20px 60px rgba(0,0,0,0.8)',
+            overflow: 'hidden',
+          }}>
+            {/* Modal header */}
+            <div style={{
+              padding: '12px 16px',
+              borderBottom: '1px solid #141414',
+              display: 'flex', alignItems: 'center', gap: 10,
+            }}>
+              <div style={{
+                width: 8, height: 8, borderRadius: '50%',
+                backgroundColor: deployPhase === 'done' ? '#4ade80' : deployPhase === 'error' ? '#f87171' : '#3b82f6',
+                boxShadow: `0 0 6px ${deployPhase === 'done' ? '#4ade80' : deployPhase === 'error' ? '#f87171' : '#3b82f644'}`,
+                animation: deployPhase === 'running' ? 'pulse 1.5s ease-in-out infinite' : 'none',
+              }} />
+              <span style={{ fontWeight: 700, fontSize: 12, color: '#d0d0d0', flex: 1 }}>
+                {deployPhase === 'done' ? 'Deployed Successfully' : deployPhase === 'error' ? 'Deploy Failed' : 'Deploying to RunPod'}
+              </span>
+              <span style={{ fontSize: 10, color: '#333', fontFamily: 'monospace' }}>{trainPodId}</span>
+              {!isDeploying && (
+                <button
+                  onClick={() => setShowDeployModal(false)}
+                  style={{ background: 'none', border: 'none', color: '#444', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: '0 2px' }}
+                >×</button>
+              )}
+            </div>
+
+            {/* Steps */}
+            <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {([
+                { key: 'generate', label: 'Generate Scripts',     icon: '⚡' },
+                { key: 'check',    label: 'Check GPU Packages',   icon: '🔍' },
+                { key: 'install',  label: 'Install Dependencies', icon: '📦' },
+                { key: 'upload',   label: 'Upload to Pod',        icon: '🚀' },
+              ] as const).map(({ key, label, icon }) => {
+                const step = deploySteps[key];
+                const statusIcon =
+                  step.status === 'running' ? '⏳'
+                  : step.status === 'done'   ? '✓'
+                  : step.status === 'error'  ? '✗'
+                  : step.status === 'skipped'? '─'
+                  : '○';
+                const statusColor =
+                  step.status === 'running' ? '#60a5fa'
+                  : step.status === 'done'   ? '#4ade80'
+                  : step.status === 'error'  ? '#f87171'
+                  : step.status === 'skipped'? '#555'
+                  : '#2a2a2a';
+                return (
+                  <div key={key} style={{
+                    display: 'flex', alignItems: 'flex-start', gap: 10,
+                    padding: '8px 10px', borderRadius: 6,
+                    backgroundColor: step.status === 'running' ? '#0a1020' : step.status === 'done' ? '#0a140a' : '#0a0a0a',
+                    border: `1px solid ${step.status === 'running' ? '#1e3a5f' : step.status === 'done' ? '#14441a' : '#141414'}`,
+                    transition: 'all 0.2s',
+                  }}>
+                    <span style={{ fontSize: 13, minWidth: 18, textAlign: 'center', lineHeight: '16px' }}>{icon}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: step.status === 'pending' ? '#3a3a3a' : '#d0d0d0' }}>
+                          {label}
+                        </span>
+                        <span style={{ fontSize: 10, color: statusColor, fontWeight: 700 }}>{statusIcon}</span>
+                      </div>
+                      {step.detail && (
+                        <div style={{ fontSize: 9.5, color: step.status === 'error' ? '#c05050' : '#4a4a4a', marginTop: 2, fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                          {step.detail}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Done state */}
+            {deployPhase === 'done' && (
+              <div style={{ margin: '0 16px 16px', padding: '10px 12px', borderRadius: 6, backgroundColor: '#0a140a', border: '1px solid #166534' }}>
+                <div style={{ fontSize: 9, color: '#4ade80', fontWeight: 700, letterSpacing: 0.5, marginBottom: 6 }}>READY TO TRAIN</div>
+                <div style={{ fontSize: 10, color: '#555', marginBottom: 6 }}>SSH into your pod and run:</div>
+                <div style={{
+                  padding: '6px 10px', borderRadius: 4,
+                  backgroundColor: '#060606', border: '1px solid #1a1a1a',
+                  fontSize: 11, color: '#a8e6a3', fontFamily: 'monospace',
+                }}>
+                  cd /workspace && python3 train.py
+                </div>
+                {generatedFiles?.wandbProject && (
+                  <div style={{ fontSize: 9, color: '#3a6a8a', marginTop: 6 }}>
+                    W&B project: <span style={{ color: '#60a5fa' }}>{generatedFiles.wandbProject}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Error state */}
+            {deployPhase === 'error' && (
+              <div style={{ margin: '0 16px 16px', padding: '8px 12px', borderRadius: 6, backgroundColor: '#110808', border: '1px solid #3d1515' }}>
+                <div style={{ fontSize: 10, color: '#c05050' }}>
+                  Deploy failed. Check the step above for details. Make sure your SSH key is added to the pod.
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       </div>
     </McpUseProvider>
   );
@@ -1056,9 +1396,13 @@ interface TrainBodyProps {
   isGeneratingTraining: boolean;
   canGenerateTraining: boolean;
   onGenerateTraining: () => void;
-  trainCopied: 'model' | 'data' | 'train' | null;
-  onTrainCopy: (key: 'model' | 'data' | 'train') => void;
+  trainWandbProject: string;
+  setTrainWandbProject: (p: string) => void;
+  trainCopied: 'model' | 'data' | 'train' | 'req' | null;
+  onTrainCopy: (key: 'model' | 'data' | 'train' | 'req') => void;
   trainValidations: Array<{ label: string; pass: boolean }>;
+  trainPodId: string;
+  setTrainPodId: (v: string) => void;
 }
 
 function TrainBody({
@@ -1072,13 +1416,15 @@ function TrainBody({
   trainEpochs, setTrainEpochs,
   animStep,
   generatedFiles, isGeneratingTraining, canGenerateTraining, onGenerateTraining,
+  trainWandbProject, setTrainWandbProject,
   trainCopied, onTrainCopy,
   trainValidations,
+  trainPodId, setTrainPodId,
 }: TrainBodyProps) {
   const accent = TRAIN_ACCENT[trainCategory];
   const datasets = TRAIN_DATASETS[trainCategory];
 
-  const [activeFile, setActiveFile] = useState<'model' | 'data' | 'train'>('train');
+  const [activeFile, setActiveFile] = useState<'model' | 'data' | 'train' | 'req'>('train');
 
   return (
     <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
@@ -1252,6 +1598,52 @@ function TrainBody({
 
         <div style={{ borderTop: '1px solid #111', margin: '0 10px' }} />
 
+        {/* W&B config */}
+        <div style={{ padding: '8px 10px 4px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase' as const, fontWeight: 700, flex: 1 }}>
+              W&amp;B
+            </div>
+            <span style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, backgroundColor: '#0a1a2a', color: '#93c5fd', border: '1px solid #1e3a5f', fontWeight: 700 }}>
+              wandb
+            </span>
+          </div>
+          <TrainConfigRow label="Project">
+            <input
+              type="text"
+              value={trainWandbProject}
+              onChange={e => setTrainWandbProject(e.target.value.toLowerCase().replace(/[^a-z0-9-]/g, '-'))}
+              placeholder="my-model"
+              style={inputStyle}
+            />
+          </TrainConfigRow>
+        </div>
+
+        <div style={{ borderTop: '1px solid #111', margin: '0 10px' }} />
+
+        {/* GPU Deploy */}
+        <div style={{ padding: '8px 10px 4px' }}>
+          <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase' as const, fontWeight: 700, marginBottom: 6 }}>
+            GPU Deploy
+          </div>
+          <TrainConfigRow label="Pod ID">
+            <input
+              type="text"
+              value={trainPodId}
+              onChange={e => setTrainPodId(e.target.value.trim())}
+              placeholder="abc123xyz…"
+              style={{ ...inputStyle, color: trainPodId ? '#d0d0d0' : '#555', borderColor: trainPodId ? '#166534' : '#1e1e1e' }}
+            />
+          </TrainConfigRow>
+          {trainPodId && (
+            <div style={{ fontSize: 8.5, color: '#2a4a2a', marginTop: -2, marginBottom: 4, marginLeft: 54 }}>
+              ✓ Pod set — click <span style={{ color: '#4ade80' }}>Run</span> to deploy
+            </div>
+          )}
+        </div>
+
+        <div style={{ borderTop: '1px solid #111', margin: '0 10px' }} />
+
         {/* Generate button */}
         <div style={{ padding: '8px 10px' }}>
           <button
@@ -1277,26 +1669,51 @@ function TrainBody({
           <>
             <div style={{ borderTop: '1px solid #111', margin: '0 10px' }} />
             <div style={{ padding: '8px 10px' }}>
-              <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase', fontWeight: 700, marginBottom: 6 }}>
+
+              {/* W&B project link */}
+              {generatedFiles.wandbProject && (
+                <div style={{
+                  marginBottom: 8, padding: '6px 8px', borderRadius: 4,
+                  backgroundColor: '#0a1020', border: '1px solid #1e3a5f',
+                  display: 'flex', alignItems: 'center', gap: 6,
+                }}>
+                  <span style={{ fontSize: 8, color: '#93c5fd', fontWeight: 700, letterSpacing: 0.5 }}>W&B</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 9, color: '#60a5fa', fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                      {generatedFiles.wandbProject}
+                    </div>
+                    <div style={{ fontSize: 8, color: '#2a4a6a', marginTop: 1 }}>
+                      run URL printed to stdout on start
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div style={{ fontSize: 9, color: '#3a3a3a', letterSpacing: 1.5, textTransform: 'uppercase' as const, fontWeight: 700, marginBottom: 6 }}>
                 Output
               </div>
 
               {/* File tabs */}
-              <div style={{ display: 'flex', gap: 3, marginBottom: 6 }}>
-                {(['model', 'data', 'train'] as const).map(f => (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 3, marginBottom: 6 }}>
+                {([
+                  { key: 'train', label: 'train.py' },
+                  { key: 'model', label: 'model.py' },
+                  { key: 'data',  label: 'data.py'  },
+                  { key: 'req',   label: 'req.txt'  },
+                ] as const).map(f => (
                   <button
-                    key={f}
-                    onClick={() => setActiveFile(f)}
+                    key={f.key}
+                    onClick={() => setActiveFile(f.key)}
                     style={{
-                      flex: 1, padding: '3px 0',
-                      backgroundColor: activeFile === f ? '#1a1a1a' : 'transparent',
-                      border: `1px solid ${activeFile === f ? '#2a2a2a' : 'transparent'}`,
+                      padding: '3px 6px',
+                      backgroundColor: activeFile === f.key ? '#1a1a1a' : 'transparent',
+                      border: `1px solid ${activeFile === f.key ? '#2a2a2a' : 'transparent'}`,
                       borderRadius: 3,
-                      color: activeFile === f ? '#d0d0d0' : '#444',
+                      color: activeFile === f.key ? '#d0d0d0' : '#444',
                       cursor: 'pointer', fontSize: 9, fontWeight: 700,
                     }}
                   >
-                    {f}.py
+                    {f.label}
                   </button>
                 ))}
               </div>
@@ -1307,10 +1724,11 @@ function TrainBody({
                   margin: 0, padding: '8px', borderRadius: 4,
                   backgroundColor: '#080808', border: '1px solid #151515',
                   fontSize: 9.5, color: '#a8e6a3', lineHeight: 1.5,
-                  maxHeight: 140, overflow: 'auto', whiteSpace: 'pre', fontFamily: 'monospace',
+                  maxHeight: 160, overflow: 'auto', whiteSpace: 'pre', fontFamily: 'monospace',
                 }}>
                   {activeFile === 'model' ? generatedFiles.modelPy
-                    : activeFile === 'data' ? generatedFiles.dataPy
+                    : activeFile === 'data'  ? generatedFiles.dataPy
+                    : activeFile === 'req'   ? generatedFiles.requirementsTxt
                     : generatedFiles.trainPy}
                 </pre>
                 <button
@@ -1330,6 +1748,258 @@ function TrainBody({
               </div>
             </div>
           </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── InferBody ──────────────────────────────────────────────────────────────
+
+interface InferBodyProps {
+  inferGenerated: GeneratedInference | null;
+  isGeneratingInference: boolean;
+  onGenerateInference: () => void;
+  inferInput: string;
+  setInferInput: (v: string) => void;
+  inferInputType: 'text' | 'image_url' | 'image_base64' | 'tabular';
+  setInferInputType: (v: 'text' | 'image_url' | 'image_base64' | 'tabular') => void;
+  inferPodId: string;
+  setInferPodId: (v: string) => void;
+  inferResult: InferResult | null;
+  isRunningInference: boolean;
+  onRunInference: () => void;
+  inferScriptCopied: boolean;
+  onCopyScript: () => void;
+}
+
+function InferBody({
+  inferGenerated, isGeneratingInference, onGenerateInference,
+  inferInput, setInferInput, inferInputType, setInferInputType,
+  inferPodId, setInferPodId,
+  inferResult, isRunningInference, onRunInference,
+  inferScriptCopied, onCopyScript,
+}: InferBodyProps) {
+  const canRun = !!inferPodId && !!inferInput && !!inferGenerated;
+
+  const inputPlaceholder =
+    inferInputType === 'text'         ? 'Enter text prompt…'
+    : inferInputType === 'image_url'  ? 'https://example.com/image.jpg'
+    : inferInputType === 'tabular'    ? '5.1, 3.5, 1.4, 0.2'
+    : 'Paste base64 image string…';
+
+  const typeAccent = '#8b5cf6'; // purple for inference
+
+  return (
+    <div style={{ display: 'flex', flex: 1, overflow: 'hidden', minHeight: 0 }}>
+
+      {/* ── Left: Input panel ───────────────────────────────────────────── */}
+      <div style={{
+        width: 240, minWidth: 240,
+        borderRight: '1px solid #141414',
+        display: 'flex', flexDirection: 'column',
+        backgroundColor: '#070707', overflowY: 'auto',
+      }}>
+        {/* Header */}
+        <div style={{ padding: '10px 12px 6px', fontSize: 9, letterSpacing: 1.5, color: '#3a3a3a', textTransform: 'uppercase' as const, fontWeight: 700, borderBottom: '1px solid #111' }}>
+          Input
+        </div>
+
+        <div style={{ padding: '10px 10px 6px', flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
+
+          {/* Input type selector */}
+          <div>
+            <div style={{ fontSize: 9, color: '#444', marginBottom: 4, fontWeight: 600, letterSpacing: 0.3 }}>Input Type</div>
+            <select
+              value={inferInputType}
+              onChange={e => setInferInputType(e.target.value as typeof inferInputType)}
+              style={{ ...selectStyle, color: '#888' }}
+            >
+              <option value="text">Text / Prompt</option>
+              <option value="image_url">Image URL</option>
+              <option value="image_base64">Image (base64)</option>
+              <option value="tabular">Tabular (CSV)</option>
+            </select>
+          </div>
+
+          {/* Input field */}
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+            <div style={{ fontSize: 9, color: '#444', marginBottom: 4, fontWeight: 600, letterSpacing: 0.3 }}>
+              {inferInputType === 'text' ? 'Prompt' : inferInputType === 'image_url' ? 'Image URL' : inferInputType === 'tabular' ? 'Feature Values' : 'Base64 Data'}
+            </div>
+            <textarea
+              value={inferInput}
+              onChange={e => setInferInput(e.target.value)}
+              placeholder={inputPlaceholder}
+              rows={inferInputType === 'image_base64' ? 4 : 6}
+              style={{
+                flex: 1,
+                padding: '6px 8px',
+                backgroundColor: '#0f0f0f',
+                border: `1px solid #1e1e1e`,
+                borderRadius: 4,
+                color: '#d0d0d0',
+                fontSize: 10,
+                outline: 'none',
+                resize: 'vertical',
+                fontFamily: inferInputType === 'text' ? 'inherit' : 'monospace',
+                boxSizing: 'border-box' as const,
+                lineHeight: 1.5,
+              }}
+              onFocus={e => (e.target.style.borderColor = typeAccent + '55')}
+              onBlur={e => (e.target.style.borderColor = '#1e1e1e')}
+            />
+          </div>
+
+          {/* Pod ID */}
+          <div>
+            <div style={{ fontSize: 9, color: '#444', marginBottom: 4, fontWeight: 600, letterSpacing: 0.3 }}>RunPod Pod ID</div>
+            <input
+              type="text"
+              value={inferPodId}
+              onChange={e => setInferPodId(e.target.value)}
+              placeholder="abc123xyz…"
+              style={{ ...inputStyle, color: inferPodId ? '#d0d0d0' : '#555' }}
+            />
+          </div>
+
+          {/* Generate script button */}
+          <button
+            onClick={onGenerateInference}
+            disabled={isGeneratingInference}
+            style={{
+              padding: '6px 0',
+              backgroundColor: isGeneratingInference ? '#1a0a2a' : '#120a1e',
+              border: `1px solid ${isGeneratingInference ? typeAccent + '44' : typeAccent + '66'}`,
+              borderRadius: 5,
+              color: isGeneratingInference ? typeAccent : '#b78bf5',
+              cursor: isGeneratingInference ? 'not-allowed' : 'pointer',
+              fontSize: 10, fontWeight: 700, letterSpacing: 0.3,
+            }}
+          >
+            {isGeneratingInference ? 'Generating…' : inferGenerated ? '↺ Re-generate Script' : '⚡ Generate Inference Script'}
+          </button>
+
+          {/* Run inference button */}
+          <button
+            onClick={onRunInference}
+            disabled={!canRun || isRunningInference}
+            style={{
+              padding: '6px 0',
+              backgroundColor: canRun && !isRunningInference ? '#0a1a0a' : '#0d0d0d',
+              border: `1px solid ${canRun && !isRunningInference ? '#166534' : '#1a1a1a'}`,
+              borderRadius: 5,
+              color: canRun && !isRunningInference ? '#4ade80' : '#2a2a2a',
+              cursor: canRun && !isRunningInference ? 'pointer' : 'not-allowed',
+              fontSize: 10, fontWeight: 700, letterSpacing: 0.3,
+            }}
+            title={!inferPodId ? 'Enter a Pod ID' : !inferInput ? 'Enter input' : !inferGenerated ? 'Generate script first' : 'Run on GPU pod'}
+          >
+            {isRunningInference ? 'Running…' : '▶ Run on GPU'}
+          </button>
+
+          {!inferGenerated && !isGeneratingInference && (
+            <div style={{ fontSize: 9, color: '#2a2a2a', lineHeight: 1.5 }}>
+              Generate the inference script first, then enter your input and pod ID to run.
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Right: Script + Output ───────────────────────────────────────── */}
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', backgroundColor: '#080808' }}>
+
+        {/* Script section */}
+        {inferGenerated && (
+          <>
+            <div style={{ padding: '6px 12px', borderBottom: '1px solid #111', display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <div style={{ fontSize: 9, letterSpacing: 1.5, color: '#3a3a3a', textTransform: 'uppercase' as const, fontWeight: 700 }}>inference.py</div>
+              <span style={{ fontSize: 8, padding: '1px 5px', borderRadius: 3, backgroundColor: '#1a0a2a', color: typeAccent, border: `1px solid ${typeAccent}44`, fontWeight: 700 }}>
+                {inferGenerated.taskType}
+              </span>
+              <div style={{ flex: 1 }} />
+              <button
+                onClick={onCopyScript}
+                style={{
+                  padding: '2px 8px',
+                  backgroundColor: inferScriptCopied ? '#0a2a0a' : '#141414',
+                  border: `1px solid ${inferScriptCopied ? '#166534' : '#252525'}`,
+                  borderRadius: 3,
+                  color: inferScriptCopied ? '#4ade80' : '#555',
+                  cursor: 'pointer', fontSize: 8, fontWeight: 700,
+                }}
+              >
+                {inferScriptCopied ? '✓ Copied' : 'copy'}
+              </button>
+            </div>
+            <div style={{ padding: '4px 8px 2px', fontSize: 9, color: '#2a2a2a', borderBottom: '1px solid #0d0d0d', flexShrink: 0 }}>
+              Input: <span style={{ color: '#444', fontFamily: 'monospace' }}>{inferGenerated.inputFormat}</span>
+            </div>
+            <pre style={{
+              flex: '0 0 auto',
+              maxHeight: inferResult ? '35%' : '70%',
+              overflowY: 'auto',
+              margin: 0,
+              padding: '8px 12px',
+              fontSize: 9.5, color: '#a8e6a3', lineHeight: 1.5,
+              fontFamily: '"Fira Code", "Cascadia Code", monospace',
+              whiteSpace: 'pre',
+              borderBottom: '1px solid #111',
+            }}>
+              {inferGenerated.inferencePy}
+            </pre>
+          </>
+        )}
+
+        {/* Output section */}
+        {inferResult && (
+          <div style={{ flex: 1, overflowY: 'auto', padding: '10px 12px' }}>
+            <div style={{ fontSize: 9, letterSpacing: 1.5, color: '#3a3a3a', textTransform: 'uppercase' as const, fontWeight: 700, marginBottom: 8 }}>
+              Output
+            </div>
+            {inferResult.error ? (
+              <div style={{
+                padding: '8px 10px', borderRadius: 5,
+                backgroundColor: '#1a0808', border: '1px solid #3d1515',
+                fontSize: 10, color: '#c05050', fontFamily: 'monospace', lineHeight: 1.5,
+              }}>
+                {inferResult.error}
+              </div>
+            ) : inferResult.result ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {Object.entries(inferResult.result).map(([key, val]) => (
+                  <div key={key} style={{
+                    padding: '7px 10px', borderRadius: 4,
+                    backgroundColor: '#0a0a0a', border: '1px solid #161616',
+                  }}>
+                    <div style={{ fontSize: 9, color: '#444', fontWeight: 700, marginBottom: 3, letterSpacing: 0.3 }}>{key}</div>
+                    <div style={{ fontSize: 10.5, color: '#d0d0d0', fontFamily: 'monospace', wordBreak: 'break-all' }}>
+                      {Array.isArray(val)
+                        ? `[${(val as number[]).map(v => typeof v === 'number' ? v.toFixed(4) : String(v)).join(', ')}]`
+                        : String(val)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <pre style={{ fontSize: 9.5, color: '#a8e6a3', fontFamily: 'monospace', margin: 0 }}>
+                {inferResult.rawOutput}
+              </pre>
+            )}
+          </div>
+        )}
+
+        {/* Empty state */}
+        {!inferGenerated && !inferResult && (
+          <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: '#262626', gap: 10 }}>
+            <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#262626" strokeWidth="1.5">
+              <circle cx="12" cy="12" r="10" />
+              <path d="M10 8l6 4-6 4V8z" />
+            </svg>
+            <div style={{ fontSize: 11, textAlign: 'center', lineHeight: 1.6, maxWidth: 200 }}>
+              Generate an inference script, enter input,<br />and run on your GPU pod.
+            </div>
+          </div>
         )}
       </div>
     </div>

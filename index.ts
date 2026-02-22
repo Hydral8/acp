@@ -681,8 +681,23 @@ server.tool(
     },
   },
   async () => {
-    const layout = designedLayout;
-    designedLayout = null; // consume — next blank call gets empty canvas
+    let layout = designedLayout;
+    designedLayout = null; // consume staged layout
+
+    // Fall back to last auto-saved design when no new layout was staged
+    if ((!layout || layout.nodes.length === 0) && savedDesign && savedDesign.nodes.length > 0) {
+      const specNodes = savedDesign.nodes.map(n => ({ id: n.id, type: n.type, parameters: n.parameters }));
+      const specEdges = savedDesign.edges.map(e => ({ from: e.sourceId, to: e.targetId }));
+      layout = autoLayout(specNodes, specEdges);
+
+      // Carry forward codeOverride from savedDesign
+      const nodes = layout.nodes.map(ln => {
+        const saved = savedDesign!.nodes.find(sn => sn.id === ln.id);
+        return saved?.codeOverride ? { ...ln, codeOverride: saved.codeOverride } : ln;
+      });
+      layout = { nodes, edges: layout.edges };
+    }
+
     const hasDesign = layout !== null && layout.nodes.length > 0;
     return widget({
       props: hasDesign ? { initialNodes: layout!.nodes, initialEdges: layout!.edges } : {},
@@ -914,7 +929,7 @@ server.tool(
 server.tool(
   {
     name: 'generate-training-code',
-    description: 'Generate modular Python training files (model.py, data.py, train.py) from the current model design and chosen training config. Reads the current graph from savedDesign automatically.',
+    description: 'Generate modular Python training files (model.py, data.py, train.py) from the current model design and chosen training config. Reads the current graph from savedDesign automatically. IMPORTANT: After this tool succeeds, immediately call show-training-deploy to show the GPU deployment panel.',
     schema: z.object({
       dataset: z.object({
         name: z.string().describe("Human-readable dataset name"),
@@ -931,17 +946,30 @@ server.tool(
         epochs:       z.number().describe("Training epochs"),
         weight_decay: z.number().optional().describe("Weight decay (default 0)"),
       }),
+      wandb: z.object({
+        project: z.string().describe("W&B project name, e.g. 'my-transformer'"),
+        entity:  z.string().optional().describe("W&B entity (username or team). Omit to use account default."),
+      }).optional().describe("Weights & Biases tracking config. Include to enable W&B logging."),
     }),
-    outputSchema: z.object({ modelPy: z.string(), dataPy: z.string(), trainPy: z.string(), summary: z.string() }),
+    outputSchema: z.object({
+      modelPy:         z.string(),
+      dataPy:          z.string(),
+      trainPy:         z.string(),
+      requirementsTxt: z.string(),
+      wandbProject:    z.string().optional(),
+      summary:         z.string(),
+    }),
   },
-  async ({ dataset, taskType, optimizer, loss, hyperparams }) => {
+  async ({ dataset, taskType, optimizer, loss, hyperparams, wandb: wandbCfg }) => {
     console.info(
-      `[generate-training-code] pid=${process.pid} at=${new Date().toISOString()} dataset=${dataset?.name ?? 'unknown'} source=${dataset?.source ?? 'unknown'} taskType=${taskType ?? 'unknown'} optimizer=${optimizer} loss=${loss}`
+      `[generate-training-code] pid=${process.pid} at=${new Date().toISOString()} dataset=${dataset?.name ?? 'unknown'} optimizer=${optimizer} loss=${loss} wandb=${wandbCfg?.project ?? 'none'}`
     );
     const graph = savedDesign;
-    const modelPy = graph ? generatePyTorchCode(graph as GraphInput) : '# No model design found. Build one with design-architecture first.\n';
-    const dataPy  = generateDataPy(dataset, taskType ?? 'unknown', hyperparams.batch_size);
-    const trainPy = generateTrainPy(optimizer, loss, hyperparams);
+    const modelPy        = graph ? generatePyTorchCode(graph as GraphInput) : '# No model design found. Build one with design-architecture first.\n';
+    const dataPy         = generateDataPy(dataset, taskType ?? 'unknown', hyperparams.batch_size);
+    const trainPy        = generateTrainPy(optimizer, loss, hyperparams, wandbCfg);
+    const requirementsTxt = generateRequirementsTxt(dataset);
+
     // Persist on server so get-training-code can retrieve it later
     savedTrainingCode = {
       modelPy, dataPy, trainPy,
@@ -951,15 +979,17 @@ server.tool(
         loss,
         taskType: taskType ?? 'unknown',
         generatedAt: new Date().toISOString(),
+        wandbProject: wandbCfg?.project,
       },
     };
     try {
       await fs.mkdir(TRAINING_OUTPUT_DIR, { recursive: true });
       await Promise.all([
-        fs.writeFile(TRAINING_FILES.model, modelPy, "utf8"),
-        fs.writeFile(TRAINING_FILES.data, dataPy, "utf8"),
-        fs.writeFile(TRAINING_FILES.train, trainPy, "utf8"),
-        fs.writeFile(TRAINING_FILES.meta, JSON.stringify(savedTrainingCode.meta, null, 2), "utf8"),
+        fs.writeFile(TRAINING_FILES.model,          modelPy,          "utf8"),
+        fs.writeFile(TRAINING_FILES.data,           dataPy,           "utf8"),
+        fs.writeFile(TRAINING_FILES.train,          trainPy,          "utf8"),
+        fs.writeFile(TRAINING_OUTPUT_DIR + "/requirements.txt", requirementsTxt, "utf8"),
+        fs.writeFile(TRAINING_FILES.meta,           JSON.stringify(savedTrainingCode.meta, null, 2), "utf8"),
       ]);
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -969,7 +999,9 @@ server.tool(
       modelPy,
       dataPy,
       trainPy,
-      summary: `Generated and saved model.py (${modelPy.split('\n').length} lines), data.py (${dataPy.split('\n').length} lines), train.py (${trainPy.split('\n').length} lines). Use get-training-code to retrieve them again.`,
+      requirementsTxt,
+      wandbProject: wandbCfg?.project,
+      summary: `Generated model.py, data.py, train.py (W&B: ${wandbCfg ? wandbCfg.project : 'disabled'}), requirements.txt. Use get-training-code to retrieve.`,
     });
   }
 );
@@ -1019,6 +1051,620 @@ server.tool(
     });
   }
 );
+
+// ── Tool: generate-inference-code ──────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'generate-inference-code',
+    description: 'Generate inference.py for running model predictions on a GPU pod. Auto-detects the task type from the saved design and training metadata. Produces a standalone script that accepts JSON input from stdin and prints JSON output to stdout.',
+    schema: z.object({
+      taskType: z.enum(['nlp_lm', 'nlp_classification', 'vision', 'tabular', 'rlhf', 'unknown'])
+        .optional()
+        .describe("Task type override. If omitted, auto-detected from saved design and training metadata."),
+    }),
+    outputSchema: z.object({
+      inferencePy: z.string(),
+      taskType: z.string(),
+      inputFormat: z.string(),
+      summary: z.string(),
+    }),
+  },
+  async ({ taskType: taskTypeOverride }) => {
+    const graph = savedDesign;
+    const detectedTask = graph ? detectTask(graph as GraphInput) : { taskType: 'unknown' as const };
+    const taskType = taskTypeOverride ?? savedTrainingCode?.meta.taskType ?? detectedTask.taskType;
+    const inferencePy = generateInferencePy(taskType);
+    savedInferenceCode = { inferencePy, taskType };
+    try {
+      await fs.mkdir(INFERENCE_OUTPUT_DIR, { recursive: true });
+      await fs.writeFile(INFERENCE_FILES.inference, inferencePy, "utf8");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[generate-inference-code] failed to persist: ${message}`);
+    }
+    const inputFormat =
+      taskType === 'nlp_lm' || taskType === 'nlp_classification' ? '{"input": "your text prompt"}' :
+      taskType === 'vision' ? '{"image_url": "https://..."}  OR  {"image_base64": "<base64>"}' :
+      '{"input": [f1, f2, f3, ...]}  OR  {"input": "f1,f2,f3"}';
+    return object({
+      inferencePy,
+      taskType,
+      inputFormat,
+      summary: `Generated inference.py for ${taskType} task. Run with: echo '${inputFormat}' | python3 inference.py. Use run-inference to execute directly on a GPU pod.`,
+    });
+  }
+);
+
+// ── Tool: run-inference ─────────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'run-inference',
+    description:
+      'Run inference on a RunPod GPU pod. Uploads inference.py and model.py to the pod via SCP, executes inference with the provided input, and returns the model output as JSON. ' +
+      'generate-inference-code must be called first, or it will be auto-generated.',
+    schema: z.object({
+      podId: z.string().describe("RunPod pod ID"),
+      input: z.string().describe(
+        "Input for the model. For LLM: text string. For vision: image URL (https://...) or base64 string. For tabular: comma-separated feature values or JSON array string."
+      ),
+      inputType: z.enum(['text', 'image_url', 'image_base64', 'tabular'])
+        .describe("Type of input data"),
+      checkpointPath: z.string().optional().default('/workspace/checkpoint.pt')
+        .describe("Path to model checkpoint on the pod (default: /workspace/checkpoint.pt)"),
+      keyFile: z.string().optional().describe("Path to SSH private key (defaults to ~/.ssh/id_ed25519)"),
+      sshHost: z.string().optional().describe("Override SSH host"),
+      sshPort: z.number().optional().describe("Override SSH port"),
+      sshUser: z.string().optional().describe("Override SSH user (default: root)"),
+      timeoutMs: z.number().optional().default(30000).describe("Inference timeout in milliseconds"),
+    }),
+    outputSchema: z.object({
+      result: z.record(z.string(), z.unknown()).optional(),
+      rawOutput: z.string().optional(),
+      error: z.string().optional(),
+    }),
+  },
+  async ({ podId, input, inputType, checkpointPath, keyFile, sshHost, sshPort, sshUser, timeoutMs }) => {
+    // Build JSON payload
+    let payload: Record<string, unknown>;
+    switch (inputType) {
+      case 'text':          payload = { input }; break;
+      case 'image_url':     payload = { image_url: input }; break;
+      case 'image_base64':  payload = { image_base64: input }; break;
+      case 'tabular':       payload = { input }; break;
+      default:              payload = { input };
+    }
+
+    // Ensure inference.py exists (auto-generate if needed)
+    if (!savedInferenceCode) {
+      const exists = await fs.access(INFERENCE_FILES.inference).then(() => true).catch(() => false);
+      if (exists) {
+        const inferencePy = await fs.readFile(INFERENCE_FILES.inference, "utf8");
+        savedInferenceCode = { inferencePy, taskType: savedTrainingCode?.meta.taskType ?? 'unknown' };
+      } else {
+        const graph = savedDesign;
+        const detectedTask = graph ? detectTask(graph as GraphInput) : { taskType: 'unknown' as const };
+        const taskType = savedTrainingCode?.meta.taskType ?? detectedTask.taskType;
+        const inferencePy = generateInferencePy(taskType);
+        savedInferenceCode = { inferencePy, taskType };
+        await fs.mkdir(INFERENCE_OUTPUT_DIR, { recursive: true });
+        await fs.writeFile(INFERENCE_FILES.inference, inferencePy, "utf8");
+      }
+    }
+
+    // Get SSH connection info for the pod
+    let sshInfo: SshInfo;
+    try {
+      sshInfo = await getPodSshInfo(podId, { host: sshHost, port: sshPort, user: sshUser });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return object({ error: `Failed to get pod SSH info: ${msg}` });
+    }
+
+    const { host, port = 22, user = 'root' } = sshInfo;
+    if (!host) return object({ error: `Could not determine SSH host for pod ${podId}` });
+
+    const resolvedKeyFile = resolveHomePath(keyFile) ?? path.join(homedir(), ".ssh", "id_ed25519");
+    const scpPortArgs = ["-P", String(port)];
+    const scpKeyArgs  = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile];
+    const sshBaseArgs = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile, "-p", String(port)];
+
+    // Upload inference.py
+    try {
+      await execFileAsync(
+        "scp",
+        [...scpKeyArgs, ...scpPortArgs, INFERENCE_FILES.inference, `${user}@${host}:/tmp/inference.py`],
+        { env: process.env, timeout: 15000 }
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return object({ error: `SCP upload of inference.py failed: ${msg}` });
+    }
+
+    // Upload model.py if available
+    const modelPyPath = TRAINING_FILES.model;
+    const modelExists = await fs.access(modelPyPath).then(() => true).catch(() => false);
+    if (modelExists) {
+      try {
+        await execFileAsync(
+          "scp",
+          [...scpKeyArgs, ...scpPortArgs, modelPyPath, `${user}@${host}:/tmp/model.py`],
+          { env: process.env, timeout: 15000 }
+        );
+      } catch {
+        // non-fatal — pod may already have model.py
+      }
+    }
+
+    // Execute inference on pod
+    const ckpt = checkpointPath ?? '/workspace/checkpoint.pt';
+    const payloadJson = JSON.stringify(payload);
+    // Single-quote safe: escape any single quotes in the JSON
+    const safeJson = payloadJson.replace(/'/g, `'"'"'`);
+    const remoteCmd = `cd /tmp && echo '${safeJson}' | CHECKPOINT_PATH='${ckpt}' python3 /tmp/inference.py 2>/tmp/inference_stderr.txt; cat /tmp/inference_stderr.txt >&2 || true`;
+
+    try {
+      const { stdout, stderr } = await execFileAsync(
+        "ssh",
+        [...sshBaseArgs, `${user}@${host}`, remoteCmd],
+        { env: process.env, timeout: timeoutMs ?? 30000 }
+      );
+      const out = stdout.trim();
+      if (stderr?.trim()) console.info(`[run-inference] stderr: ${stderr.trim()}`);
+      try {
+        const result = JSON.parse(out) as Record<string, unknown>;
+        return object({ result, rawOutput: out });
+      } catch {
+        return object({ rawOutput: out });
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return object({ error: `Inference execution failed: ${msg}` });
+    }
+  }
+);
+
+// ── Tool: show-training-deploy ─────────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'show-training-deploy',
+    description:
+      'Show the training deployment widget after generating training scripts. ' +
+      'The widget lets users deploy scripts to a GPU pod step-by-step: check packages, install deps, upload files, and run inference. ' +
+      'ALWAYS call this immediately after generate-training-code succeeds.',
+    schema: z.object({}),
+    widget: {
+      name: 'training-deploy',
+      invoking: 'Preparing deployment panel…',
+      invoked: 'Ready to deploy to GPU',
+    },
+  },
+  async () => {
+    const tc = savedTrainingCode;
+    const hasModelPy  = !!(tc?.modelPy  || await fs.access(TRAINING_FILES.model).then(() => true).catch(() => false));
+    const hasDataPy   = !!(tc?.dataPy   || await fs.access(TRAINING_FILES.data).then(() => true).catch(() => false));
+    const hasTrainPy  = !!(tc?.trainPy  || await fs.access(TRAINING_FILES.train).then(() => true).catch(() => false));
+    const hasReq      = await fs.access(path.join(TRAINING_OUTPUT_DIR, "requirements.txt")).then(() => true).catch(() => false);
+    return widget({
+      props: {
+        hasModelPy,
+        hasDataPy,
+        hasTrainPy,
+        hasInferencePy: !!(savedInferenceCode || await fs.access(INFERENCE_FILES.inference).then(() => true).catch(() => false)),
+        hasRequirements: hasReq,
+        wandbProject: tc?.meta?.wandbProject,
+        taskType:     tc?.meta?.taskType,
+        dataset:      tc?.meta?.dataset,
+        optimizer:    tc?.meta?.optimizer,
+        loss:         tc?.meta?.loss,
+      },
+      output: text(
+        tc
+          ? `Training scripts ready (${tc.meta?.dataset ?? 'unknown dataset'}, ${tc.meta?.optimizer ?? '?'} / ${tc.meta?.loss ?? '?'}). ` +
+            `Use the deployment panel to check GPU packages, install dependencies, and upload scripts.`
+          : 'No training scripts generated yet — run generate-training-code first.'
+      ),
+    });
+  }
+);
+
+// ── Tool: check-gpu-packages ───────────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'check-gpu-packages',
+    description:
+      'Check what Python packages are installed on a RunPod GPU pod (via pip freeze). ' +
+      'Use this before setup-gpu to avoid reinstalling packages that already exist.',
+    schema: z.object({
+      podId:   z.string().describe("RunPod pod ID"),
+      keyFile: z.string().optional().describe("SSH private key path (default: ~/.ssh/id_ed25519)"),
+      sshHost: z.string().optional().describe("Override SSH host"),
+      sshPort: z.number().optional().describe("Override SSH port"),
+      sshUser: z.string().optional().describe("Override SSH user (default: root)"),
+    }),
+    outputSchema: z.object({
+      packages: z.array(z.string()),
+      packageCount: z.number(),
+      hasTorch: z.boolean(),
+      hasWandb: z.boolean(),
+      hasTransformers: z.boolean(),
+      hasDatasets: z.boolean(),
+      rawOutput: z.string(),
+    }),
+  },
+  async ({ podId, keyFile, sshHost, sshPort, sshUser }) => {
+    const sshInfo = await getPodSshInfo(podId, { host: sshHost, port: sshPort, user: sshUser });
+    const { host, port = 22, user = 'root' } = sshInfo;
+    if (!host) throw new Error(`Could not determine SSH host for pod ${podId}`);
+    const resolvedKeyFile = resolveHomePath(keyFile) ?? path.join(homedir(), ".ssh", "id_ed25519");
+    const sshBaseArgs = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile, "-p", String(port)];
+    const { stdout } = await execFileAsync("ssh", [...sshBaseArgs, `${user}@${host}`, "pip freeze 2>/dev/null || pip3 freeze 2>/dev/null"], {
+      env: process.env, timeout: 30000,
+    });
+    const packages = stdout.trim().split('\n').filter(Boolean);
+    const pkgLower = packages.map(p => p.toLowerCase());
+    return object({
+      packages,
+      packageCount: packages.length,
+      hasTorch:        pkgLower.some(p => p.startsWith('torch')),
+      hasWandb:        pkgLower.some(p => p.startsWith('wandb')),
+      hasTransformers: pkgLower.some(p => p.startsWith('transformers')),
+      hasDatasets:     pkgLower.some(p => p.startsWith('datasets')),
+      rawOutput: stdout.trim(),
+    });
+  }
+);
+
+// ── Tool: setup-gpu ────────────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'setup-gpu',
+    description:
+      'Install Python dependencies on a RunPod GPU pod. Reads requirements.txt from the generated training directory, ' +
+      'compares against already-installed packages (via pip freeze), and only installs what is missing. ' +
+      'Pass extraPackages to install additional packages not in requirements.txt.',
+    schema: z.object({
+      podId:         z.string().describe("RunPod pod ID"),
+      extraPackages: z.array(z.string()).optional().describe("Additional pip package specs to install, e.g. ['pillow', 'requests']"),
+      force:         z.boolean().optional().describe("If true, install all requirements without checking existing packages (default: false)"),
+      keyFile:       z.string().optional().describe("SSH private key path"),
+      sshHost:       z.string().optional().describe("Override SSH host"),
+      sshPort:       z.number().optional().describe("Override SSH port"),
+      sshUser:       z.string().optional().describe("Override SSH user (default: root)"),
+      timeoutMs:     z.number().optional().default(300000).describe("Install timeout in ms (default: 5 minutes)"),
+    }),
+    outputSchema: z.object({
+      installed: z.array(z.string()),
+      skipped:   z.array(z.string()),
+      stdout:    z.string().optional(),
+      stderr:    z.string().optional(),
+      summary:   z.string(),
+    }),
+  },
+  async ({ podId, extraPackages = [], force = false, keyFile, sshHost, sshPort, sshUser, timeoutMs }) => {
+    const sshInfo = await getPodSshInfo(podId, { host: sshHost, port: sshPort, user: sshUser });
+    const { host, port = 22, user = 'root' } = sshInfo;
+    if (!host) throw new Error(`Could not determine SSH host for pod ${podId}`);
+    const resolvedKeyFile = resolveHomePath(keyFile) ?? path.join(homedir(), ".ssh", "id_ed25519");
+    const sshBaseArgs = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile, "-p", String(port)];
+
+    // Read requirements.txt from disk
+    let reqLines: string[] = [];
+    try {
+      const reqPath = path.join(TRAINING_OUTPUT_DIR, "requirements.txt");
+      const reqText = await fs.readFile(reqPath, "utf8");
+      reqLines = reqText.trim().split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
+    } catch {
+      // no requirements.txt yet — rely on extraPackages
+    }
+    const allRequired = [...reqLines, ...extraPackages];
+    if (allRequired.length === 0) {
+      return object({ installed: [], skipped: [], summary: "No packages to install." });
+    }
+
+    // Get installed packages (unless forced)
+    let installedPkgs: string[] = [];
+    if (!force) {
+      try {
+        const { stdout: freezeOut } = await execFileAsync("ssh", [...sshBaseArgs, `${user}@${host}`, "pip freeze 2>/dev/null"], {
+          env: process.env, timeout: 30000,
+        });
+        installedPkgs = freezeOut.trim().split('\n').filter(Boolean).map(p => p.split('==')[0].split('>=')[0].split('<=')[0].trim().toLowerCase());
+      } catch {
+        // ignore — install everything
+      }
+    }
+
+    // Filter to only packages not already installed
+    const toInstall: string[] = [];
+    const skipped:   string[] = [];
+    for (const pkg of allRequired) {
+      const pkgName = pkg.split('>=')[0].split('==')[0].split('<=')[0].trim().toLowerCase();
+      if (!force && installedPkgs.includes(pkgName)) {
+        skipped.push(pkg);
+      } else {
+        toInstall.push(pkg);
+      }
+    }
+
+    if (toInstall.length === 0) {
+      return object({ installed: [], skipped, summary: `All ${skipped.length} required package(s) already installed. Nothing to do.` });
+    }
+
+    // Build pip install command — use pip/pip3 whichever is available
+    const pipArgs = toInstall.map(p => JSON.stringify(p)).join(' ');
+    const installCmd = `pip install --quiet ${pipArgs} 2>&1 || pip3 install --quiet ${pipArgs} 2>&1`;
+    const { stdout, stderr } = await execFileAsync("ssh", [...sshBaseArgs, `${user}@${host}`, installCmd], {
+      env: process.env, timeout: timeoutMs ?? 300000,
+    });
+
+    return object({
+      installed: toInstall,
+      skipped,
+      stdout: stdout.trim() || undefined,
+      stderr: stderr.trim() || undefined,
+      summary: `Installed ${toInstall.length} package(s), skipped ${skipped.length} already-present.`,
+    });
+  }
+);
+
+// ── Tool: upload-scripts ───────────────────────────────────────────────────
+
+server.tool(
+  {
+    name: 'upload-scripts',
+    description:
+      'Upload the generated training and inference scripts (model.py, data.py, train.py, inference.py, requirements.txt) to a RunPod GPU pod via SCP. ' +
+      'Use this after generate-training-code and optionally generate-inference-code to prepare the pod for training or inference.',
+    schema: z.object({
+      podId:       z.string().describe("RunPod pod ID"),
+      remotePath:  z.string().optional().default('/workspace').describe("Remote directory to upload files to (default: /workspace)"),
+      files:       z.array(z.enum(['model', 'data', 'train', 'inference', 'requirements'])).optional()
+        .describe("Which files to upload. Omit to upload all available files."),
+      keyFile:     z.string().optional().describe("SSH private key path"),
+      sshHost:     z.string().optional().describe("Override SSH host"),
+      sshPort:     z.number().optional().describe("Override SSH port"),
+      sshUser:     z.string().optional().describe("Override SSH user (default: root)"),
+    }),
+    outputSchema: z.object({
+      uploaded: z.array(z.string()),
+      skipped:  z.array(z.string()),
+      errors:   z.array(z.string()),
+      summary:  z.string(),
+    }),
+  },
+  async ({ podId, remotePath = '/workspace', files, keyFile, sshHost, sshPort, sshUser }) => {
+    const sshInfo = await getPodSshInfo(podId, { host: sshHost, port: sshPort, user: sshUser });
+    const { host, port = 22, user = 'root' } = sshInfo;
+    if (!host) throw new Error(`Could not determine SSH host for pod ${podId}`);
+    const resolvedKeyFile = resolveHomePath(keyFile) ?? path.join(homedir(), ".ssh", "id_ed25519");
+    const scpKeyArgs  = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile];
+    const scpPortArgs = ["-P", String(port)];
+    const sshBaseArgs = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile, "-p", String(port)];
+
+    // Ensure remote path exists
+    try {
+      await execFileAsync("ssh", [...sshBaseArgs, `${user}@${host}`, `mkdir -p ${remotePath}`], {
+        env: process.env, timeout: 10000,
+      });
+    } catch {
+      // ignore
+    }
+
+    const fileCandidates: Array<{ key: string; localPath: string; remoteName: string }> = [
+      { key: 'model',        localPath: TRAINING_FILES.model,          remoteName: 'model.py'          },
+      { key: 'data',         localPath: TRAINING_FILES.data,           remoteName: 'data.py'           },
+      { key: 'train',        localPath: TRAINING_FILES.train,          remoteName: 'train.py'          },
+      { key: 'inference',    localPath: INFERENCE_FILES.inference,     remoteName: 'inference.py'      },
+      { key: 'requirements', localPath: path.join(TRAINING_OUTPUT_DIR, "requirements.txt"), remoteName: 'requirements.txt' },
+    ];
+
+    const wanted = files ? new Set(files) : null;
+    const uploaded: string[] = [];
+    const skipped:  string[] = [];
+    const errors:   string[] = [];
+
+    for (const { key, localPath, remoteName } of fileCandidates) {
+      if (wanted && !wanted.has(key as Parameters<typeof wanted.has>[0])) { skipped.push(remoteName); continue; }
+      const exists = await fs.access(localPath).then(() => true).catch(() => false);
+      if (!exists) { skipped.push(`${remoteName} (not generated)`); continue; }
+      try {
+        await execFileAsync("scp", [...scpKeyArgs, ...scpPortArgs, localPath, `${user}@${host}:${remotePath}/${remoteName}`], {
+          env: process.env, timeout: 30000,
+        });
+        uploaded.push(remoteName);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        errors.push(`${remoteName}: ${msg}`);
+      }
+    }
+
+    return object({
+      uploaded,
+      skipped,
+      errors,
+      summary: `Uploaded ${uploaded.length} file(s) to ${user}@${host}:${remotePath}. ${errors.length > 0 ? `${errors.length} error(s).` : ''}`,
+    });
+  }
+);
+
+// ── Inference code-gen helper ──────────────────────────────────────────────
+
+function generateInferencePy(taskType: string): string {
+  const isLLM     = taskType === 'nlp_lm' || taskType === 'nlp_classification';
+  const isVision  = taskType === 'vision';
+
+  if (isLLM) {
+    return `"""inference.py — LLM / NLP text inference
+Run: echo '{"input": "Once upon a time"}' | python3 inference.py
+"""
+import sys, json
+import torch
+from transformers import AutoTokenizer
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+from model import Model
+
+TOKENIZER  = "gpt2"       # swap for the tokenizer used during training
+MAX_LENGTH = 512
+CHECKPOINT = "checkpoint.pt"
+
+tokenizer = AutoTokenizer.from_pretrained(TOKENIZER)
+model = Model().to(device)
+try:
+    state = torch.load(CHECKPOINT, map_location=device, weights_only=True)
+    model.load_state_dict(state.get("model_state_dict", state))
+    print("[inference] loaded checkpoint", file=sys.stderr)
+except FileNotFoundError:
+    print("[inference] no checkpoint found — using random weights", file=sys.stderr)
+model.eval()
+
+
+def run(payload: dict) -> dict:
+    text = payload.get("input", "")
+    tokens = tokenizer(
+        text, return_tensors="pt", truncation=True,
+        max_length=MAX_LENGTH, padding="max_length",
+    )
+    input_ids = tokens["input_ids"].to(device)
+    with torch.no_grad():
+        output = model(input_ids)
+    logits = output[0] if isinstance(output, (tuple, list)) else output
+    # Next-token predictions from the last valid position
+    seq_len = (input_ids != tokenizer.pad_token_id).sum(dim=1)[0].item() - 1
+    next_logits = logits[0, int(seq_len), :]
+    probs = torch.softmax(next_logits, dim=-1)
+    top_probs, top_ids = torch.topk(probs, 5)
+    top_tokens = [tokenizer.decode([i]) for i in top_ids.tolist()]
+    return {"top_tokens": top_tokens, "top_probs": [round(float(p), 4) for p in top_probs.tolist()]}
+
+
+if __name__ == "__main__":
+    raw = sys.stdin.read().strip()
+    payload = json.loads(raw) if raw.startswith("{") else {"input": raw}
+    print(json.dumps(run(payload)))
+`;
+  }
+
+  if (isVision) {
+    return `"""inference.py — Vision / image classification inference
+Run: echo '{"image_url": "https://example.com/cat.jpg"}' | python3 inference.py
+     echo '{"image_base64": "<base64string>"}' | python3 inference.py
+"""
+import sys, json, io, base64
+import torch
+import torchvision.transforms as T
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+from model import Model
+
+CHECKPOINT = "checkpoint.pt"
+transform  = T.Compose([
+    T.Resize((224, 224)),
+    T.ToTensor(),
+    T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+])
+
+model = Model().to(device)
+try:
+    state = torch.load(CHECKPOINT, map_location=device, weights_only=True)
+    model.load_state_dict(state.get("model_state_dict", state))
+    print("[inference] loaded checkpoint", file=sys.stderr)
+except FileNotFoundError:
+    print("[inference] no checkpoint found — using random weights", file=sys.stderr)
+model.eval()
+
+
+def preprocess(payload: dict):
+    from PIL import Image
+    if "image_url" in payload:
+        import requests
+        resp = requests.get(payload["image_url"], timeout=10)
+        img = Image.open(io.BytesIO(resp.content)).convert("RGB")
+    elif "image_base64" in payload:
+        data = base64.b64decode(payload["image_base64"])
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+    else:
+        raise ValueError("Provide 'image_url' or 'image_base64' in payload")
+    return transform(img).unsqueeze(0).to(device)
+
+
+def run(payload: dict) -> dict:
+    x = preprocess(payload)
+    with torch.no_grad():
+        output = model(x)
+    logits = output[0] if isinstance(output, (tuple, list)) else output
+    probs = torch.softmax(logits, dim=-1)
+    top_probs, top_ids = torch.topk(probs, 5)
+    return {
+        "top_classes": top_ids[0].tolist(),
+        "top_probs": [round(float(p), 4) for p in top_probs[0].tolist()],
+    }
+
+
+if __name__ == "__main__":
+    raw = sys.stdin.read().strip()
+    payload = json.loads(raw) if raw.startswith("{") else {"image_url": raw}
+    print(json.dumps(run(payload)))
+`;
+  }
+
+  // Tabular / MLP (default)
+  return `"""inference.py — Tabular / MLP inference
+Run: echo '{"input": [5.1, 3.5, 1.4, 0.2]}' | python3 inference.py
+     echo '{"input": "5.1,3.5,1.4,0.2"}' | python3 inference.py
+"""
+import sys, json
+import torch
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+from model import Model
+
+CHECKPOINT = "checkpoint.pt"
+
+model = Model().to(device)
+try:
+    state = torch.load(CHECKPOINT, map_location=device, weights_only=True)
+    model.load_state_dict(state.get("model_state_dict", state))
+    print("[inference] loaded checkpoint", file=sys.stderr)
+except FileNotFoundError:
+    print("[inference] no checkpoint found — using random weights", file=sys.stderr)
+model.eval()
+
+
+def run(payload: dict) -> dict:
+    raw_input = payload.get("input", [])
+    if isinstance(raw_input, str):
+        values = [float(v.strip()) for v in raw_input.split(",")]
+    else:
+        values = [float(v) for v in raw_input]
+    x = torch.tensor(values, dtype=torch.float32).unsqueeze(0).to(device)
+    with torch.no_grad():
+        output = model(x)
+    logits = output[0] if isinstance(output, (tuple, list)) else output
+    if logits.shape[-1] == 1:
+        return {"prediction": round(float(logits.item()), 6)}
+    probs = torch.softmax(logits, dim=-1)
+    pred_class = int(probs.argmax(dim=-1).item())
+    return {
+        "predicted_class": pred_class,
+        "probabilities": [round(float(p), 4) for p in probs[0].tolist()],
+    }
+
+
+if __name__ == "__main__":
+    raw = sys.stdin.read().strip()
+    payload = json.loads(raw) if raw.startswith("{") else {"input": raw}
+    print(json.dumps(run(payload)))
+`;
+}
 
 // ── Training code-gen helpers ───────────────────────────────────────────────
 
@@ -1125,34 +1771,69 @@ function generateTrainPy(
   optimizer: string,
   loss: string,
   hp: { lr: number; batch_size: number; epochs: number; weight_decay?: number },
+  wandbConfig?: { project: string; entity?: string },
 ): string {
   const wd = hp.weight_decay ?? 0;
-  const optArgs = optimizer === 'SGD'
-    ? `model.parameters(), lr=${hp.lr}, momentum=0.9, weight_decay=${wd}`
-    : `model.parameters(), lr=${hp.lr}, weight_decay=${wd}`;
-  const lossInit = loss === 'MSELoss'
-    ? 'nn.MSELoss()'
-    : loss === 'BCEWithLogitsLoss'
-    ? 'nn.BCEWithLogitsLoss()'
-    : 'nn.CrossEntropyLoss()';
 
-  return `"""train.py — training loop"""
+  const optArgs: Record<string, string> = {
+    SGD:      `model.parameters(), lr=${hp.lr}, momentum=0.9, weight_decay=${wd}`,
+    LBFGS:    `model.parameters(), lr=${hp.lr}`,
+  };
+  const resolvedOptArgs = optArgs[optimizer] ?? `model.parameters(), lr=${hp.lr}, weight_decay=${wd}`;
+
+  const lossInits: Record<string, string> = {
+    MSELoss:           'nn.MSELoss()',
+    BCELoss:           'nn.BCELoss()',
+    BCEWithLogitsLoss: 'nn.BCEWithLogitsLoss()',
+    NLLLoss:           'nn.NLLLoss()',
+    L1Loss:            'nn.L1Loss()',
+    HuberLoss:         'nn.HuberLoss()',
+    KLDivLoss:         'nn.KLDivLoss(reduction="batchmean")',
+    CTCLoss:           'nn.CTCLoss()',
+    CrossEntropyLoss:  'nn.CrossEntropyLoss()',
+  };
+  const resolvedLoss = lossInits[loss] ?? 'nn.CrossEntropyLoss()';
+
+  const wandbProject = wandbConfig?.project ?? 'my-model';
+  const wandbEntity  = wandbConfig?.entity  ? `"${wandbConfig.entity}"` : 'None';
+
+  return `"""train.py — training loop with Weights & Biases tracking"""
+import os
 import torch
 import torch.nn as nn
+import wandb
 from model import Model
 from data import get_dataloaders
 
-DEVICE    = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
-LR        = ${hp.lr}
-BATCH     = ${hp.batch_size}
-EPOCHS    = ${hp.epochs}
-SAVE_PATH = "checkpoint_best.pt"
+DEVICE        = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
+LR            = ${hp.lr}
+BATCH         = ${hp.batch_size}
+EPOCHS        = ${hp.epochs}
+SAVE_PATH     = "checkpoint_best.pt"
+WANDB_PROJECT = "${wandbProject}"
+WANDB_ENTITY  = ${wandbEntity}   # set to your W&B username/team, or None for default
 
 
 def train():
+    run = wandb.init(
+        project=WANDB_PROJECT,
+        entity=WANDB_ENTITY,
+        config={
+            "lr":          LR,
+            "batch_size":  BATCH,
+            "epochs":      EPOCHS,
+            "optimizer":   "${optimizer}",
+            "loss":        "${loss}",
+            "device":      str(DEVICE),
+        },
+    )
+
+    # ── Print run URL — orchestration layer captures this line ────────────
+    print(f"WANDB_RUN_URL: {run.get_url()}", flush=True)
+
     model     = Model().to(DEVICE)
-    optimizer = torch.optim.${optimizer}(${optArgs})
-    criterion = ${lossInit}
+    optimizer = torch.optim.${optimizer}(${resolvedOptArgs})
+    criterion = ${resolvedLoss}
     train_loader, val_loader = get_dataloaders(batch_size=BATCH)
 
     best_val = float("inf")
@@ -1164,14 +1845,15 @@ def train():
         for batch in train_loader:
             x, y = batch[0].to(DEVICE), batch[1].to(DEVICE)
             optimizer.zero_grad()
-            out  = model(x)
-            loss = criterion(out, y)
+            out   = model(x)
+            loss  = criterion(out, y)
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
         train_loss /= len(train_loader)
 
         # ── validation ────────────────────────────────────────────────────
+        log_dict = {"epoch": epoch, "train/loss": train_loss}
         val_info = ""
         if val_loader:
             model.eval()
@@ -1181,21 +1863,38 @@ def train():
                     x, y = batch[0].to(DEVICE), batch[1].to(DEVICE)
                     val_loss += criterion(model(x), y).item()
             val_loss /= len(val_loader)
+            log_dict["val/loss"] = val_loss
             val_info = f"  val={val_loss:.4f}"
             if val_loss < best_val:
                 best_val = val_loss
                 torch.save(model.state_dict(), SAVE_PATH)
+                wandb.save(SAVE_PATH)
                 val_info += " ✓saved"
 
+        wandb.log(log_dict)
         print(f"Epoch {epoch:03d}/{EPOCHS}  train={train_loss:.4f}{val_info}")
 
     torch.save(model.state_dict(), "model_final.pt")
+    wandb.save("model_final.pt")
+    wandb.finish()
     print(f"Done. Best val loss: {best_val:.4f}")
 
 
 if __name__ == "__main__":
     train()
 `;
+}
+
+function generateRequirementsTxt(dataset: { source: string }): string {
+  const base = [
+    'torch>=2.2.0',
+    'torchvision>=0.17.0',
+    'wandb>=0.17.0',
+  ];
+  if (dataset.source === 'huggingface') {
+    base.push('datasets>=2.18.0', 'transformers>=4.40.0', 'huggingface_hub>=0.22.0');
+  }
+  return base.join('\n') + '\n';
 }
 
 // ── Validation ─────────────────────────────────────────────────────────────
@@ -1982,6 +2681,17 @@ server.tool(
 // ── Server-side in-memory design storage (latest save from widget) ─────────
 let savedDesign: z.infer<typeof graphSchema> | null = null;
 
+// ── Server-side inference code storage ──────────────────────────────────────
+interface SavedInferenceCode {
+  inferencePy: string;
+  taskType: string;
+}
+let savedInferenceCode: SavedInferenceCode | null = null;
+const INFERENCE_OUTPUT_DIR = path.join(process.cwd(), "generated_inference");
+const INFERENCE_FILES = {
+  inference: path.join(INFERENCE_OUTPUT_DIR, "inference.py"),
+};
+
 // ── Server-side training script storage ─────────────────────────────────────
 interface SavedTrainingCode {
   modelPy: string;
@@ -1993,6 +2703,7 @@ interface SavedTrainingCode {
     loss: string;
     taskType: string;
     generatedAt: string;
+    wandbProject?: string;
   };
 }
 let savedTrainingCode: SavedTrainingCode | null = null;
@@ -2318,9 +3029,40 @@ To modify an existing design:
 ## Step 7 — Generate code
 Call \`generate-pytorch-code\` (graph is optional — omit to use the saved design) to produce runnable PyTorch.
 
-## Step 8 — Training scripts
-Call \`prepare-train\` to open the training setup widget, then \`generate-training-code\` to produce model.py / data.py / train.py.
+## Step 8 — Training scripts + deployment ← two mandatory calls
+1. Call \`prepare-train\` to open the training setup widget.
+2. User picks a dataset and configures training in the Train tab.
+3. After \`generate-training-code\` runs (the user clicks "Generate Scripts" in the widget), call \`show-training-deploy\` immediately.
+   **Do not skip show-training-deploy.** It gives the user a one-click GPU deployment panel.
+
 Scripts are saved server-side automatically. Use \`get-training-code\` to retrieve them later (e.g. file='train' for just train.py).
+
+## Step 9 — GPU setup and script upload
+Before training or inference on a GPU pod, follow this order:
+
+1. **check-gpu-packages** — Check what is already installed on the pod.
+   - Read the output carefully. Only install what is missing.
+   - Common pre-installed on RunPod PyTorch images: torch, torchvision, numpy, PIL, requests.
+
+2. **setup-gpu** — Install missing packages.
+   - Reads requirements.txt (generated by generate-training-code) and pip freeze (already installed) automatically.
+   - Skips already-installed packages. Pass force=true only if reinstall is needed.
+   - Pass extraPackages for any additional dependencies not in requirements.txt.
+
+3. **upload-scripts** — Upload model.py, data.py, train.py, inference.py, requirements.txt to the pod.
+   - Default remote path: /workspace
+   - Specify the files array to upload only a subset.
+
+### Package policy (IMPORTANT)
+- ALWAYS call check-gpu-packages before setup-gpu to avoid reinstalling packages.
+- Do NOT install packages that are already present — RunPod PyTorch images ship with torch, torchvision, numpy, Pillow, requests.
+- requirements.txt is the source of truth for dependencies and is generated automatically by generate-training-code.
+
+## Step 10 — Inference
+Call \`generate-inference-code\` to produce a task-aware inference.py (LLM, vision, or tabular).
+Then use \`run-inference\` to execute on the GPU pod — it uploads scripts, runs inference, and returns JSON.
+
+The user can also switch to the **Infer** tab in the architecture builder widget to run inference interactively.
 
 ---
 **Summary of the mandatory three-step render sequence:**
