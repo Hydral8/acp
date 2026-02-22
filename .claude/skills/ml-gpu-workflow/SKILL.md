@@ -21,9 +21,7 @@ This skill guides you through the complete workflow: design → train setup → 
 |------|---------|
 | `generate-training-code` | Generate training scripts with W&B integration |
 | `show-training-deploy` | **Show GPU deployment widget after generate-training-code** |
-| `check-gpu-packages` | Read what pip packages are installed on the pod |
-| `setup-gpu` | Install missing packages (smart diff, skips already-installed) |
-| `upload-scripts` | SCP model.py / data.py / train.py / inference.py to pod |
+| `runpod-pod-run` | Run any shell command on the pod (upload files via base64, pip install, train) |
 | `generate-inference-code` | Generate task-aware inference.py |
 | `run-inference` | Upload + execute inference on GPU pod, return JSON |
 | `get-training-code` | Retrieve previously generated scripts |
@@ -48,9 +46,8 @@ The `training-deploy` widget handles GPU setup interactively:
 
 ### Phase 2: Manual GPU Setup (if not using widget)
 ```
-1. check-gpu-packages     → Read what's already installed
-2. setup-gpu              → Install ONLY what is missing (reads requirements.txt + pip freeze)
-3. upload-scripts         → SCP all scripts to /workspace
+1. runpod-pod-run → upload each file: echo '<b64>' | base64 -d > /workspace/file.py
+2. runpod-pod-run → pip install -q -r /workspace/requirements.txt
 ```
 
 ### Phase 3: Training
@@ -78,22 +75,12 @@ Option C — Manual SSH:
 
 ## Package Policy (CRITICAL)
 
-**NEVER install packages that are likely already installed.**
-
-RunPod PyTorch images (`runpod/pytorch:*`) ship with:
-- torch, torchvision, torchaudio
-- numpy, scipy, matplotlib
-- Pillow (PIL), requests, aiohttp
-- cuda drivers, cudnn
-
-**Always call `check-gpu-packages` first.** The `setup-gpu` tool does this automatically when `force` is not set.
+RunPod PyTorch images (`runpod/pytorch:*`) already have torch, torchvision, numpy, Pillow, requests installed.
+Use `runpod-pod-run` to install only what requirements.txt adds on top of those.
 
 ```
-# DO:
-check-gpu-packages → see what's missing → setup-gpu (installs only missing)
-
-# DON'T:
-setup-gpu with force=true  (reinstalls everything, wastes time)
+# Upload requirements.txt first, then:
+runpod-pod-run → pip install -q -r /workspace/requirements.txt
 ```
 
 ---
@@ -126,7 +113,7 @@ setup-gpu with force=true  (reinstalls everything, wastes time)
 | SCP fails | SSH key not added to pod | Run `runpodctl ssh add-key` or check `~/.ssh/id_ed25519.pub` |
 | `ModuleNotFoundError: model` | model.py not uploaded | Call `upload-scripts` |
 | `FileNotFoundError: checkpoint.pt` | No checkpoint saved yet | inference runs with random weights — train first |
-| pip install timeout | Large packages on slow connection | Increase `timeoutMs` in setup-gpu |
+| pip install timeout | Large packages on slow connection | Increase `timeoutMs` in runpod-pod-run (default 60s, set to 300000) |
 
 ---
 
@@ -136,7 +123,6 @@ When the user says "set up training and deploy to GPU", do ALL of these:
 
 1. `generate-training-code` (if not already done)
 2. `generate-inference-code` (auto-detects task type)
-3. `check-gpu-packages` → note what's missing
-4. `setup-gpu` → installs missing packages
-5. `upload-scripts` → uploads all files to /workspace
-6. Tell user: "Scripts are ready. SSH in and run `python3 train.py`"
+3. `runpod-pod-run` → upload each file: `echo '<b64>' | base64 -d > /workspace/file.py`
+4. `runpod-pod-run` → `pip install -q -r /workspace/requirements.txt`
+5. Tell user: "Scripts are ready. SSH in and run `python3 train.py`"

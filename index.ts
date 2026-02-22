@@ -1323,174 +1323,6 @@ server.tool(
   }
 );
 
-// ── Tool: setup-gpu ────────────────────────────────────────────────────────
-
-server.tool(
-  {
-    name: 'setup-gpu',
-    description:
-      'Install Python dependencies on a RunPod GPU pod. Reads requirements.txt from the generated training directory, ' +
-      'compares against already-installed packages (via pip freeze), and only installs what is missing. ' +
-      'Pass extraPackages to install additional packages not in requirements.txt.',
-    schema: z.object({
-      podId:         z.string().describe("RunPod pod ID"),
-      extraPackages: z.array(z.string()).optional().describe("Additional pip package specs to install, e.g. ['pillow', 'requests']"),
-      force:         z.boolean().optional().describe("If true, install all requirements without checking existing packages (default: false)"),
-      keyFile:       z.string().optional().describe("SSH private key path"),
-      sshHost:       z.string().optional().describe("Override SSH host"),
-      sshPort:       z.number().optional().describe("Override SSH port"),
-      sshUser:       z.string().optional().describe("Override SSH user (default: root)"),
-      timeoutMs:     z.number().optional().default(300000).describe("Install timeout in ms (default: 5 minutes)"),
-    }),
-    outputSchema: z.object({
-      installed: z.array(z.string()),
-      skipped:   z.array(z.string()),
-      stdout:    z.string().optional(),
-      stderr:    z.string().optional(),
-      summary:   z.string(),
-    }),
-    widget: { name: "", widgetAccessible: true },
-  },
-  async ({ podId, extraPackages = [], force = false, keyFile, sshHost, sshPort, sshUser, timeoutMs }) => {
-    const sshInfo = await getPodSshInfo(podId, { host: sshHost, port: sshPort, user: sshUser });
-    const { host, port = 22, user = 'root' } = sshInfo;
-    if (!host) throw new Error(`Could not determine SSH host for pod ${podId}`);
-    const resolvedKeyFile = resolveHomePath(keyFile) ?? path.join(homedir(), ".ssh", "id_ed25519");
-    const sshBaseArgs = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile, "-p", String(port)];
-
-    // Read requirements.txt from disk
-    let reqLines: string[] = [];
-    try {
-      const reqPath = path.join(TRAINING_OUTPUT_DIR, "requirements.txt");
-      const reqText = await fs.readFile(reqPath, "utf8");
-      reqLines = reqText.trim().split('\n').filter(l => l.trim() && !l.trim().startsWith('#'));
-    } catch {
-      // no requirements.txt yet — rely on extraPackages
-    }
-    const allRequired = [...reqLines, ...extraPackages];
-    if (allRequired.length === 0) {
-      return object({ installed: [], skipped: [], summary: "No packages to install." });
-    }
-
-    // Get installed packages (unless forced)
-    let installedPkgs: string[] = [];
-    if (!force) {
-      try {
-        const { stdout: freezeOut } = await execFileAsync("ssh", [...sshBaseArgs, `${user}@${host}`, "pip freeze 2>/dev/null"], {
-          env: process.env, timeout: 30000,
-        });
-        installedPkgs = freezeOut.trim().split('\n').filter(Boolean).map(p => p.split('==')[0].split('>=')[0].split('<=')[0].trim().toLowerCase());
-      } catch {
-        // ignore — install everything
-      }
-    }
-
-    // Filter to only packages not already installed
-    const toInstall: string[] = [];
-    const skipped:   string[] = [];
-    for (const pkg of allRequired) {
-      const pkgName = pkg.split('>=')[0].split('==')[0].split('<=')[0].trim().toLowerCase();
-      if (!force && installedPkgs.includes(pkgName)) {
-        skipped.push(pkg);
-      } else {
-        toInstall.push(pkg);
-      }
-    }
-
-    if (toInstall.length === 0) {
-      return object({ installed: [], skipped, summary: `All ${skipped.length} required package(s) already installed. Nothing to do.` });
-    }
-
-    // Build pip install command — use pip/pip3 whichever is available
-    const pipArgs = toInstall.map(p => JSON.stringify(p)).join(' ');
-    const installCmd = `pip install --quiet ${pipArgs} 2>&1 || pip3 install --quiet ${pipArgs} 2>&1`;
-    const { stdout, stderr } = await execFileAsync("ssh", [...sshBaseArgs, `${user}@${host}`, installCmd], {
-      env: process.env, timeout: timeoutMs ?? 300000,
-    });
-
-    return object({
-      installed: toInstall,
-      skipped,
-      stdout: stdout.trim() || undefined,
-      stderr: stderr.trim() || undefined,
-      summary: `Installed ${toInstall.length} package(s), skipped ${skipped.length} already-present.`,
-    });
-  }
-);
-
-// ── Tool: upload-scripts ───────────────────────────────────────────────────
-
-server.tool(
-  {
-    name: 'upload-scripts',
-    description:
-      'Write generated training/inference scripts directly to a RunPod GPU pod via SSH stdin (no SCP). ' +
-      'Reads content from in-memory saved code — no local disk files required.',
-    schema: z.object({
-      podId:      z.string().describe("RunPod pod ID"),
-      remotePath: z.string().optional().default('/workspace').describe("Remote directory (default: /workspace)"),
-      keyFile:    z.string().optional().describe("SSH private key path"),
-      sshHost:    z.string().optional().describe("Override SSH host"),
-      sshPort:    z.number().optional().describe("Override SSH port"),
-      sshUser:    z.string().optional().describe("Override SSH user (default: root)"),
-    }),
-    outputSchema: z.object({
-      uploaded: z.array(z.string()),
-      skipped:  z.array(z.string()),
-      errors:   z.array(z.string()),
-      summary:  z.string(),
-    }),
-    widget: { name: "", widgetAccessible: true },
-  },
-  async ({ podId, remotePath = '/workspace', keyFile, sshHost, sshPort, sshUser }) => {
-    const sshInfo = await getPodSshInfo(podId, { host: sshHost, port: sshPort, user: sshUser });
-    const { host, port = 22, user = 'root' } = sshInfo;
-    if (!host) throw new Error(`Could not determine SSH host for pod ${podId}`);
-    const resolvedKeyFile = resolveHomePath(keyFile) ?? path.join(homedir(), ".ssh", "id_ed25519");
-    const sshArgs = ["-o", "StrictHostKeyChecking=no", "-i", resolvedKeyFile, "-p", String(port), `${user}@${host}`];
-
-    // Ensure remote directory exists
-    await execFileAsync("ssh", [...sshArgs, `mkdir -p ${remotePath}`], { env: process.env, timeout: 10000 }).catch(() => {});
-
-    // Write file content directly via SSH stdin — no SCP, no disk reads
-    const writeViaSSH = async (remoteName: string, content: string) => {
-      await execFileAsync("ssh", [...sshArgs, `cat > ${remotePath}/${remoteName}`], {
-        input: content, env: process.env, timeout: 30000,
-      } as Parameters<typeof execFileAsync>[2] & { input: string });
-    };
-
-    // Collect files from in-memory saved code
-    const fileCandidates: Array<{ remoteName: string; content: string | undefined }> = [
-      { remoteName: 'model.py',          content: savedTrainingCode?.modelPy },
-      { remoteName: 'data.py',           content: savedTrainingCode?.dataPy },
-      { remoteName: 'train.py',          content: savedTrainingCode?.trainPy },
-      { remoteName: 'requirements.txt',  content: savedTrainingCode?.requirementsTxt },
-      { remoteName: 'inference.py',      content: savedInferenceCode?.inferencePy },
-    ];
-
-    const uploaded: string[] = [];
-    const skipped:  string[] = [];
-    const errors:   string[] = [];
-
-    for (const { remoteName, content } of fileCandidates) {
-      if (!content?.trim()) { skipped.push(`${remoteName} (not generated)`); continue; }
-      try {
-        await writeViaSSH(remoteName, content);
-        uploaded.push(remoteName);
-      } catch (err) {
-        errors.push(`${remoteName}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    return object({
-      uploaded,
-      skipped,
-      errors,
-      summary: `Wrote ${uploaded.length} file(s) to ${remotePath} via SSH. ${errors.length > 0 ? `${errors.length} error(s).` : ''}`,
-    });
-  }
-);
-
 // ── Inference code-gen helper ──────────────────────────────────────────────
 
 function generateInferencePy(taskType: string): string {
@@ -3043,26 +2875,22 @@ Call \`generate-pytorch-code\` (graph is optional — omit to use the saved desi
 
 Scripts are saved server-side automatically. Use \`get-training-code\` to retrieve them later (e.g. file='train' for just train.py).
 
-## Step 9 — GPU setup and script upload
-Before training or inference on a GPU pod, follow this order:
+## Step 9 — Deploy scripts and install dependencies via runpod-pod-run
+Use \`runpod-pod-run\` to deploy scripts and install dependencies directly on the pod.
 
-1. **check-gpu-packages** — Check what is already installed on the pod.
-   - Read the output carefully. Only install what is missing.
-   - Common pre-installed on RunPod PyTorch images: torch, torchvision, numpy, PIL, requests.
+1. **Upload each script** — use \`runpod-pod-run\` with a base64-encoded write command per file:
+   \`\`\`
+   echo '<base64>' | base64 -d > /workspace/model.py
+   \`\`\`
+   Files to upload: model.py, data.py, train.py, requirements.txt (and inference.py if generated).
 
-2. **setup-gpu** — Install missing packages.
-   - Reads requirements.txt (generated by generate-training-code) and pip freeze (already installed) automatically.
-   - Skips already-installed packages. Pass force=true only if reinstall is needed.
-   - Pass extraPackages for any additional dependencies not in requirements.txt.
+2. **Install dependencies** — after uploading requirements.txt, run:
+   \`\`\`
+   pip install -q -r /workspace/requirements.txt
+   \`\`\`
+   RunPod PyTorch images already have torch, torchvision, numpy, Pillow pre-installed so only extra deps need downloading.
 
-3. **upload-scripts** — Upload model.py, data.py, train.py, inference.py, requirements.txt to the pod.
-   - Default remote path: /workspace
-   - Specify the files array to upload only a subset.
-
-### Package policy (IMPORTANT)
-- ALWAYS call check-gpu-packages before setup-gpu to avoid reinstalling packages.
-- Do NOT install packages that are already present — RunPod PyTorch images ship with torch, torchvision, numpy, Pillow, requests.
-- requirements.txt is the source of truth for dependencies and is generated automatically by generate-training-code.
+The widget "Run" button handles this automatically — it uploads all files then runs pip install.
 
 ## Step 10 — Inference
 Call \`generate-inference-code\` to produce a task-aware inference.py (LLM, vision, or tabular).

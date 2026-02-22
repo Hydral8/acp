@@ -21,9 +21,8 @@ type DeployStepStatus = 'pending' | 'running' | 'done' | 'error' | 'skipped';
 interface DeployStepState { status: DeployStepStatus; detail?: string; }
 interface DeployStepsState {
   generate: DeployStepState;
-  check: DeployStepState;
-  install: DeployStepState;
   upload: DeployStepState;
+  install: DeployStepState;
 }
 
 const TRAIN_DATASETS: Record<CatKey, DatasetDef[]> = {
@@ -138,9 +137,7 @@ export default function MLArchitectureBuilder() {
   const { callToolAsync: callGetTraining } = useCallTool('get-training-code');
   const { callToolAsync: callGenInference, isPending: isGeneratingInference } = useCallTool('generate-inference-code');
   const { callToolAsync: callRunInference, isPending: isRunningInference } = useCallTool('run-inference');
-  const { callToolAsync: callCheckGpuPkgs } = useCallTool('check-gpu-packages');
-  const { callToolAsync: callSetupGpu } = useCallTool('setup-gpu');
-  const { callToolAsync: callUploadScripts } = useCallTool('upload-scripts');
+  const { callToolAsync: callRunpodRun } = useCallTool('runpod-pod-run');
   const callSaveRef = useRef(callSave);
   callSaveRef.current = callSave;
 
@@ -193,9 +190,8 @@ export default function MLArchitectureBuilder() {
   const [isDeploying, setIsDeploying] = useState(false);
   const [deploySteps, setDeploySteps] = useState<DeployStepsState>({
     generate: { status: 'pending' },
-    check: { status: 'pending' },
-    install: { status: 'pending' },
-    upload: { status: 'pending' },
+    upload:   { status: 'pending' },
+    install:  { status: 'pending' },
   });
 
   // ── Graph mutations ──────────────────────────────────────────────────────
@@ -583,18 +579,19 @@ export default function MLArchitectureBuilder() {
 
     const initSteps: DeployStepsState = {
       generate: { status: generatedFiles ? 'skipped' : 'pending' },
-      check:    { status: 'pending' },
-      install:  { status: 'pending' },
       upload:   { status: 'pending' },
+      install:  { status: 'pending' },
     };
     setDeploySteps(initSteps);
     setDeployPhase('running');
     setIsDeploying(true);
     setShowDeployModal(true);
 
+    let files = generatedFiles;
+
     try {
       // Step 1: Generate scripts (if not already done)
-      if (!generatedFiles) {
+      if (!files) {
         setDeploySteps(prev => ({ ...prev, generate: { status: 'running' } }));
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -606,7 +603,8 @@ export default function MLArchitectureBuilder() {
           } as any);
           const sc = result?.structuredContent as { modelPy?: string; dataPy?: string; trainPy?: string; requirementsTxt?: string; wandbProject?: string } | undefined;
           if (sc?.modelPy || sc?.trainPy) {
-            setGeneratedFiles({ modelPy: sc!.modelPy ?? '', dataPy: sc!.dataPy ?? '', trainPy: sc!.trainPy ?? '', requirementsTxt: sc!.requirementsTxt ?? '', wandbProject: sc!.wandbProject });
+            files = { modelPy: sc!.modelPy ?? '', dataPy: sc!.dataPy ?? '', trainPy: sc!.trainPy ?? '', requirementsTxt: sc!.requirementsTxt ?? '', wandbProject: sc!.wandbProject };
+            setGeneratedFiles(files);
             setDeploySteps(prev => ({ ...prev, generate: { status: 'done', detail: '4 scripts generated' } }));
           } else {
             throw new Error('No scripts returned');
@@ -620,54 +618,48 @@ export default function MLArchitectureBuilder() {
         setDeploySteps(prev => ({ ...prev, generate: { status: 'skipped', detail: 'Already generated' } }));
       }
 
-      // Step 2: Check installed packages
-      setDeploySteps(prev => ({ ...prev, check: { status: 'running' } }));
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const checkResult = await callCheckGpuPkgs({ podId: trainPodId } as any);
-        const sc = checkResult?.structuredContent as { packageCount?: number; hasTorch?: boolean; hasWandb?: boolean } | undefined;
-        const flags = [sc?.hasTorch && 'torch', sc?.hasWandb && 'wandb'].filter(Boolean).join(', ');
-        setDeploySteps(prev => ({ ...prev, check: { status: 'done', detail: `${sc?.packageCount ?? '?'} pkgs — ${flags || 'checked'}` } }));
-      } catch (e) {
-        setDeploySteps(prev => ({ ...prev, check: { status: 'error', detail: String(e) } }));
+      // Step 2: Upload scripts via runpod-pod-run (base64-encoded per file)
+      setDeploySteps(prev => ({ ...prev, upload: { status: 'running' } }));
+      const uploadCandidates: Array<{ name: string; content: string }> = [
+        { name: 'model.py',         content: files.modelPy },
+        { name: 'data.py',          content: files.dataPy },
+        { name: 'train.py',         content: files.trainPy },
+        { name: 'requirements.txt', content: files.requirementsTxt },
+      ].filter(f => f.content?.trim());
+      const uploaded: string[] = [];
+      const uploadErrors: string[] = [];
+      for (const { name, content } of uploadCandidates) {
+        try {
+          const b64 = btoa(unescape(encodeURIComponent(content)));
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          await callRunpodRun({ podId: trainPodId, command: `echo '${b64}' | base64 -d > /workspace/${name}`, timeoutMs: 15000 } as any);
+          uploaded.push(name);
+        } catch (e) {
+          uploadErrors.push(`${name}: ${String(e)}`);
+        }
+      }
+      if (uploadErrors.length > 0 && uploaded.length === 0) {
+        setDeploySteps(prev => ({ ...prev, upload: { status: 'error', detail: uploadErrors[0] } }));
         setDeployPhase('error');
         return;
       }
+      setDeploySteps(prev => ({ ...prev, upload: { status: 'done', detail: uploaded.join(', ') } }));
 
-      // Step 3: Install missing packages
+      // Step 3: Install dependencies
       setDeploySteps(prev => ({ ...prev, install: { status: 'running' } }));
       try {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const installResult = await callSetupGpu({ podId: trainPodId } as any);
-        const sc = installResult?.structuredContent as { installed?: string[]; skipped?: string[] } | undefined;
-        const installed = sc?.installed ?? [];
-        const skippedCount = sc?.skipped?.length ?? 0;
-        const detail = installed.length > 0
-          ? `Installed: ${installed.slice(0, 3).join(', ')}${installed.length > 3 ? ` +${installed.length - 3}` : ''}`
-          : `All ${skippedCount} packages already present`;
-        setDeploySteps(prev => ({ ...prev, install: { status: 'done', detail } }));
-      } catch (e) {
-        // Non-fatal — continue to upload
-        setDeploySteps(prev => ({ ...prev, install: { status: 'error', detail: String(e) } }));
-      }
-
-      // Step 4: Upload scripts
-      setDeploySteps(prev => ({ ...prev, upload: { status: 'running' } }));
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const uploadResult = await callUploadScripts({ podId: trainPodId } as any);
-        const sc = uploadResult?.structuredContent as { uploaded?: string[] } | undefined;
-        const files = sc?.uploaded ?? [];
-        setDeploySteps(prev => ({ ...prev, upload: { status: 'done', detail: files.join(', ') || 'Files uploaded' } }));
+        await callRunpodRun({ podId: trainPodId, command: 'pip install -q -r /workspace/requirements.txt 2>&1', timeoutMs: 300000 } as any);
+        setDeploySteps(prev => ({ ...prev, install: { status: 'done', detail: 'pip install complete' } }));
         setDeployPhase('done');
       } catch (e) {
-        setDeploySteps(prev => ({ ...prev, upload: { status: 'error', detail: String(e) } }));
+        setDeploySteps(prev => ({ ...prev, install: { status: 'error', detail: String(e) } }));
         setDeployPhase('error');
       }
     } finally {
       setIsDeploying(false);
     }
-  }, [trainPodId, generatedFiles, trainSelected, trainOptimizer, trainLoss, trainLR, trainBatchSize, trainEpochs, trainWandbProject, callGenTraining, callCheckGpuPkgs, callSetupGpu, callUploadScripts]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [trainPodId, generatedFiles, trainSelected, trainOptimizer, trainLoss, trainLR, trainBatchSize, trainEpochs, trainWandbProject, callGenTraining, callRunpodRun]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleRunInference = useCallback(async () => {
     if (!inferPodId || !inferInput) return;
@@ -1307,9 +1299,8 @@ export default function MLArchitectureBuilder() {
             <div style={{ padding: '14px 16px', display: 'flex', flexDirection: 'column', gap: 10 }}>
               {([
                 { key: 'generate', label: 'Generate Scripts',     icon: '⚡' },
-                { key: 'check',    label: 'Check GPU Packages',   icon: '🔍' },
-                { key: 'install',  label: 'Install Dependencies', icon: '📦' },
                 { key: 'upload',   label: 'Upload to Pod',        icon: '🚀' },
+                { key: 'install',  label: 'Install Dependencies', icon: '📦' },
               ] as const).map(({ key, label, icon }) => {
                 const step = deploySteps[key];
                 const statusIcon =
