@@ -1509,6 +1509,7 @@ function generateDataPy(
     const hfId = dataset.hfId ?? 'dataset/name';
     const isNLP = taskType.startsWith('nlp') || taskType === 'rlhf';
     return `"""data.py — HuggingFace dataset loader for ${dataset.name}"""
+import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 ${isNLP ? "from transformers import AutoTokenizer" : "import torchvision.transforms as T"}
@@ -1524,30 +1525,41 @@ def get_dataloaders(batch_size=BATCH_SIZE, hf_token=None):
     tok.pad_token = tok.eos_token
 
     def tokenize(batch):
-        return tok(batch["text"], truncation=True, max_length=MAX_LENGTH, padding="max_length")
+        enc = tok(batch["text"], truncation=True, max_length=MAX_LENGTH, padding="max_length")
+        enc["labels"] = enc["input_ids"].copy()
+        return enc
 
-    train_ds = ds["train"].map(tokenize, batched=True, remove_columns=ds["train"].column_names)
+    def collate_fn(batch):
+        ids = torch.stack([torch.tensor(b["input_ids"]) for b in batch])
+        # Causal LM: x = tokens[:-1], y = tokens[1:]  (next-token prediction)
+        return ids[:, :-1].contiguous(), ids[:, 1:].contiguous()
+
+    cols = ds["train"].column_names
+    train_ds = ds["train"].map(tokenize, batched=True, remove_columns=cols)
     val_ds   = ds.get("validation") or ds.get("test")
     if val_ds:
         val_ds = val_ds.map(tokenize, batched=True, remove_columns=val_ds.column_names)
 
-    train_ds.set_format("torch")
-    if val_ds: val_ds.set_format("torch")
-
     return (
-        DataLoader(train_ds, batch_size=batch_size, shuffle=True),
-        DataLoader(val_ds,   batch_size=batch_size) if val_ds else None,
+        DataLoader(train_ds, batch_size=batch_size, shuffle=True,  collate_fn=collate_fn),
+        DataLoader(val_ds,   batch_size=batch_size, collate_fn=collate_fn) if val_ds else None,
     )` : `
 
 def get_dataloaders(batch_size=BATCH_SIZE, hf_token=None):
     ds = load_dataset(DATASET_ID, token=hf_token)
-    # TODO: define transforms and adjust column names for your dataset
-    transform = T.Compose([T.ToTensor(), T.Normalize((0.5,), (0.5,))])
+    # TODO: adjust column names and transforms for your dataset
     train_ds = ds["train"]
     val_ds   = ds.get("validation") or ds.get("test")
+
+    def collate_fn(batch):
+        # Assumes dataset has "pixel_values"/"image" and "label" columns — adjust as needed
+        xs = torch.stack([torch.tensor(b.get("pixel_values", b.get("image", [])), dtype=torch.float32) for b in batch])
+        ys = torch.tensor([b["label"] for b in batch], dtype=torch.long)
+        return xs, ys
+
     return (
-        DataLoader(train_ds, batch_size=batch_size, shuffle=True),
-        DataLoader(val_ds,   batch_size=batch_size) if val_ds else None,
+        DataLoader(train_ds, batch_size=batch_size, shuffle=True,  collate_fn=collate_fn),
+        DataLoader(val_ds,   batch_size=batch_size, collate_fn=collate_fn) if val_ds else None,
     )`}
 `;
   }
@@ -1629,6 +1641,13 @@ function generateTrainPy(
   const wandbEntity  = wandbConfig?.entity  ? `"${wandbConfig.entity}"` : 'None';
 
   return `"""train.py — training loop with Weights & Biases tracking"""
+import subprocess, sys
+# Install project dependencies before any other imports
+subprocess.run(
+    [sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt"],
+    check=False,
+)
+
 import os
 import torch
 import torch.nn as nn
@@ -1677,7 +1696,8 @@ def train():
             x, y = batch[0].to(DEVICE), batch[1].to(DEVICE)
             optimizer.zero_grad()
             out   = model(x)
-            loss  = criterion(out, y)
+            # Handle 3-D sequence output [batch, seq, vocab] for language models
+            loss  = criterion(out.reshape(-1, out.size(-1)), y.reshape(-1)) if out.dim() == 3 else criterion(out, y)
             loss.backward()
             optimizer.step()
             train_loss += loss.item()
@@ -1692,7 +1712,8 @@ def train():
             with torch.no_grad():
                 for batch in val_loader:
                     x, y = batch[0].to(DEVICE), batch[1].to(DEVICE)
-                    val_loss += criterion(model(x), y).item()
+                    out = model(x)
+                    val_loss += (criterion(out.reshape(-1, out.size(-1)), y.reshape(-1)) if out.dim() == 3 else criterion(out, y)).item()
             val_loss /= len(val_loader)
             log_dict["val/loss"] = val_loss
             val_info = f"  val={val_loss:.4f}"
@@ -2135,7 +2156,7 @@ function generatePyTorchCode(graph: GraphInput): string {
 import torch.nn as nn${needsMath ? '\nimport math' : ''}
 
 
-${helperSection}class GeneratedModel(nn.Module):
+${helperSection}class Model(nn.Module):
     def __init__(self):
         super().__init__()
 ${indent2(initLines)}
@@ -2145,7 +2166,7 @@ ${indent1([...forwardLines, `return ${lastVar}`])}
 
 
 # ── Setup ──────────────────────────────────────────────────────────────────
-model = GeneratedModel()
+model = Model()
 ${optLine}
 ${lossLine}
 
