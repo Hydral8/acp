@@ -435,6 +435,7 @@ server.tool(
       addKeyStdout: z.string().optional(),
       addKeyStderr: z.string().optional(),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async (input) => {
     const apiKey =
@@ -588,6 +589,7 @@ server.tool(
       stdout: z.string().optional(),
       stderr: z.string().optional(),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async (input) => {
     if (input.ensureKey) {
@@ -760,6 +762,7 @@ server.tool(
       code: z.string(),
       errors: z.array(z.string()),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ graph: graphArg }) => {
     const graph = (graphArg && graphArg.nodes.length > 0) ? graphArg : savedDesign;
@@ -954,6 +957,7 @@ server.tool(
       valid: z.boolean(),
       errors: z.array(z.string()),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ graph }) => {
     const errors = validateGraph(graph);
@@ -996,6 +1000,7 @@ server.tool(
       wandbProject:    z.string().optional(),
       summary:         z.string(),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ dataset, taskType, optimizer, loss, hyperparams, wandb: wandbCfg }) => {
     console.info(
@@ -1059,6 +1064,7 @@ server.tool(
       meta:    z.object({ dataset: z.string(), optimizer: z.string(), loss: z.string(), taskType: z.string(), generatedAt: z.string() }).optional(),
       found:   z.boolean(),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ file = 'all' }) => {
     console.info(
@@ -1108,6 +1114,7 @@ server.tool(
       inputFormat: z.string(),
       summary: z.string(),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ taskType: taskTypeOverride }) => {
     const graph = savedDesign;
@@ -1163,6 +1170,7 @@ server.tool(
       rawOutput: z.string().optional(),
       error: z.string().optional(),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ podId, input, inputType, checkpointPath, keyFile, sshHost, sshPort, sshUser, timeoutMs }) => {
     // Build JSON payload
@@ -1335,6 +1343,7 @@ server.tool(
       stderr:    z.string().optional(),
       summary:   z.string(),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ podId, extraPackages = [], force = false, keyFile, sshHost, sshPort, sshUser, timeoutMs }) => {
     const sshInfo = await getPodSshInfo(podId, { host: sshHost, port: sshPort, user: sshUser });
@@ -1425,6 +1434,7 @@ server.tool(
       errors:   z.array(z.string()),
       summary:  z.string(),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ podId, remotePath = '/workspace', keyFile, sshHost, sshPort, sshUser }) => {
     const sshInfo = await getPodSshInfo(podId, { host: sshHost, port: sshPort, user: sshUser });
@@ -2626,6 +2636,7 @@ server.tool(
       description: z.string().optional().describe("Optional description for the catalog"),
     }),
     outputSchema: z.object({ registered: z.boolean(), type: z.string() }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ type, label, category, defaultParams, hasInput, hasOutput, description }) => {
     customTypeRegistry.set(type, { label, category, defaultParams, hasInput, hasOutput, description: description ?? '' });
@@ -2654,6 +2665,7 @@ server.tool(
       outputNodeId: z.string().describe("ID of the internal node that provides external output"),
     }),
     outputSchema: z.object({ registered: z.boolean(), name: z.string() }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ name, nodes, edges, inputNodeId, outputNodeId }) => {
     customCompositeRegistry.set(name, { nodes, edges, inputNodeId, outputNodeId });
@@ -2718,6 +2730,7 @@ server.tool(
       title: z.string().optional().describe("Architecture name for display"),
     }),
     outputSchema: z.object({ staged: z.boolean(), nodeCount: z.number(), edgeCount: z.number(), nextStep: z.string() }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ nodes: specNodes, edges: specEdges, title }) => {
     const layout = autoLayout(specNodes, specEdges);
@@ -2741,6 +2754,7 @@ server.tool(
       graph: graphSchema.describe("Current architecture graph"),
     }),
     outputSchema: z.object({ saved: z.boolean() }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ graph }) => {
     savedDesign = graph;
@@ -2759,6 +2773,7 @@ server.tool(
       graph: graphSchema.nullable(),
       message: z.string(),
     }),
+    widget: { name: "", widgetAccessible: true },
   },
   async () => {
     if (!savedDesign) {
@@ -2786,6 +2801,7 @@ server.tool(
       ),
     }),
     outputSchema: z.object({ updated: z.boolean(), nodeId: z.string(), message: z.string() }),
+    widget: { name: "", widgetAccessible: true },
   },
   async ({ nodeId, code }) => {
     if (!savedDesign) {

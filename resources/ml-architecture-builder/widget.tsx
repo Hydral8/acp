@@ -686,33 +686,49 @@ export default function MLArchitectureBuilder() {
     }
   }, [inferPodId, inferInput, inferInputType, callRunInference]);
 
-  // When a dataset is selected: auto-fix Input shape, then cascade-fix downstream conflicts
+  // When a dataset is selected: auto-fix Input shape (creating one if missing), cascade-fix conflicts
   const handleDatasetSelect = useCallback((ds: DatasetDef | null) => {
     setTrainSelected(ds);
     if (ds) setTrainWandbProject(ds.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, ''));
     if (!ds) return;
     const targetShape = PREPROCESS_OUT_SHAPE[trainCategory];
-    setNodes(prevNodes => {
-      // Fix Input node shape
-      let updated = prevNodes.map(n =>
-        n.type === 'Input'
-          ? { ...n, parameters: { ...n.parameters, shape: targetShape } }
-          : n
-      );
-      // Cascade: apply fixSelf for any remaining conflicts (two passes for chained deps)
-      for (let pass = 0; pass < 2; pass++) {
-        const map = propagateShapes(updated, edges);
-        updated = updated.map(n => {
-          const info = map.get(n.id);
-          if (info?.conflict && info.fixSelf) {
-            return { ...n, parameters: { ...n.parameters, [info.fixSelf.key]: info.fixSelf.value } };
-          }
-          return n;
-        });
+
+    // Work directly on current nodes/edges so we can update both atomically
+    let newNodes: GraphNode[] = nodes.map(n =>
+      n.type === 'Input'
+        ? { ...n, parameters: { ...n.parameters, shape: targetShape } }
+        : n
+    );
+    let newEdges: GraphEdge[] = [...edges];
+
+    // Auto-create Input node if the architecture doesn't have one
+    if (!newNodes.some(n => n.type === 'Input')) {
+      const inputId = newNodeId();
+      const inputNode: GraphNode = { id: inputId, type: 'Input', x: 80, y: 80, parameters: { shape: targetShape } };
+      newNodes = [inputNode, ...newNodes];
+      // Connect it to the first node that has no incoming edge (topological root)
+      const hasIncoming = new Set(newEdges.map(e => e.targetId));
+      const firstNode = newNodes.slice(1).find(n => !hasIncoming.has(n.id));
+      if (firstNode) {
+        newEdges = [...newEdges, { id: newEdgeId(), sourceId: inputId, targetId: firstNode.id }];
       }
-      return updated;
-    });
-  }, [trainCategory, edges]);
+    }
+
+    // Cascade: apply fixSelf for any remaining shape conflicts (two passes for chained deps)
+    for (let pass = 0; pass < 2; pass++) {
+      const map = propagateShapes(newNodes, newEdges);
+      newNodes = newNodes.map(n => {
+        const info = map.get(n.id);
+        if (info?.conflict && info.fixSelf) {
+          return { ...n, parameters: { ...n.parameters, [info.fixSelf.key]: info.fixSelf.value } };
+        }
+        return n;
+      });
+    }
+
+    setNodes(newNodes);
+    setEdges(newEdges);
+  }, [trainCategory, nodes, edges]);
 
   // ── Composite detail + custom library ────────────────────────────────────
 
